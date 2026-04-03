@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QFileSystemWatcher
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -82,6 +82,8 @@ class CommandWorker(QObject):
 class WriteImagesTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._folder_watcher = QFileSystemWatcher(self)
+        self._folder_watcher.directoryChanged.connect(self._on_watched_folder_changed)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -149,6 +151,8 @@ class WriteImagesTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select image folder")
         if folder:
             self.folder_input.setText(folder)
+            self._set_watched_folder(folder)
+            self._scan_folder()
 
     def _scan_folder(self) -> None:
         folder_text = self.folder_input.text().strip()
@@ -166,15 +170,33 @@ class WriteImagesTab(QWidget):
             for path in folder.iterdir()
             if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
         ]
-        sorted_files = sorted(found, key=_disk_sort_key)
+        current_items: dict[str, Qt.CheckState] = {}
+        current_order: list[str] = []
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            path_value = item.data(Qt.UserRole)
+            if path_value:
+                path_str = str(path_value)
+                current_items[path_str] = item.checkState()
+                current_order.append(path_str)
+
+        found_by_path = {str(path): path for path in found}
+        merged_paths: list[str] = [path for path in current_order if path in found_by_path]
+        for new_path in sorted(found_by_path.values(), key=_disk_sort_key):
+            new_path_str = str(new_path)
+            if new_path_str not in current_items:
+                merged_paths.append(new_path_str)
 
         self.file_list.clear()
-        for file_path in sorted_files:
+        for path_str in merged_paths:
+            file_path = Path(path_str)
             item = QListWidgetItem(file_path.name)
-            item.setData(Qt.UserRole, str(file_path))
+            item.setData(Qt.UserRole, path_str)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(current_items.get(path_str, Qt.Checked))
             self.file_list.addItem(item)
 
-        self._append_log(f"Found {len(sorted_files)} supported image file(s).")
+        self._append_log(f"Found {len(found_by_path)} supported image file(s).")
 
     def _start_write(self) -> None:
         disk_files = self._collect_disk_files()
@@ -238,9 +260,19 @@ class WriteImagesTab(QWidget):
         for index in range(self.file_list.count()):
             item = self.file_list.item(index)
             path_value = item.data(Qt.UserRole)
-            if path_value:
+            if path_value and item.checkState() == Qt.Checked:
                 files.append(Path(path_value))
         return files
+
+    def _set_watched_folder(self, folder_path: str) -> None:
+        existing_dirs = self._folder_watcher.directories()
+        if existing_dirs:
+            self._folder_watcher.removePaths(existing_dirs)
+        self._folder_watcher.addPath(folder_path)
+
+    def _on_watched_folder_changed(self, folder_path: str) -> None:
+        if folder_path == self.folder_input.text().strip():
+            self._scan_folder()
 
     def _failure_action(self, disk_index: int) -> DiskAction:
         msg = QMessageBox(self)
