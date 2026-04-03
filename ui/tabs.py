@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from PySide6.QtCore import Qt, QFileSystemWatcher, QTimer
+from PySide6.QtCore import Qt, QFileSystemWatcher, QTimer, QSettings
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -230,10 +230,12 @@ class CommandWorker(QObject):
 class WriteImagesTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._settings = QSettings()
         self.setAcceptDrops(True)
         self._folder_watcher = QFileSystemWatcher(self)
         self._folder_watcher.directoryChanged.connect(self._on_watched_folder_changed)
         self._build_ui()
+        self._load_settings()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -254,6 +256,7 @@ class WriteImagesTab(QWidget):
 
         gw_row = QHBoxLayout()
         self.gw_path_input = QLineEdit(detect_gw_executable())
+        self.gw_path_input.textChanged.connect(self._save_settings)
         gw_browse_btn = QPushButton("Browse gw")
         gw_browse_btn.clicked.connect(self._select_gw_path)
         gw_row.addWidget(QLabel("gw executable:"))
@@ -278,19 +281,31 @@ class WriteImagesTab(QWidget):
 
         options_group = QGroupBox("Options")
         options_layout = QFormLayout(options_group)
+
         self._all_formats_loaded = False
         self.format_combo = QComboBox()
         self.custom_format_checkbox = QCheckBox("Use custom format")
         self.custom_format_input = QLineEdit()
         self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
         self.custom_format_input.setEnabled(False)
+
         self._populate_format_combo()
+
         self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.format_combo.currentIndexChanged.connect(self._save_settings)
+
         self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
+        self.custom_format_checkbox.toggled.connect(self._save_settings)
+
+        self.custom_format_input.textChanged.connect(self._save_settings)
 
         self.verify_checkbox = QCheckBox("Verify")
         self.verify_checkbox.setChecked(True)
+        self.verify_checkbox.toggled.connect(self._save_settings)
+
         self.extra_flags_input = QLineEdit()
+        self.extra_flags_input.textChanged.connect(self._save_settings)
+
         options_layout.addRow("Disk format:", self.format_combo)
         options_layout.addRow("Custom:", self.custom_format_checkbox)
         options_layout.addRow("Custom format string:", self.custom_format_input)
@@ -328,6 +343,62 @@ class WriteImagesTab(QWidget):
         layout.addWidget(QLabel("Log:"))
         layout.addWidget(self.log, 1)
 
+    def _save_settings(self) -> None:
+        self._settings.setValue("write/folder", self.folder_input.text().strip())
+        self._settings.setValue("write/gw_path", self.gw_path_input.text().strip())
+        self._settings.setValue("write/verify", self.verify_checkbox.isChecked())
+        self._settings.setValue("write/extra_flags", self.extra_flags_input.text())
+
+        self._settings.setValue("write/format_expanded", self._all_formats_loaded)
+        self._settings.setValue(
+            "write/custom_format_enabled",
+            self.custom_format_checkbox.isChecked(),
+        )
+        self._settings.setValue(
+            "write/custom_format_text",
+            self.custom_format_input.text(),
+        )
+
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            self._settings.setValue("write/selected_format", current_text)
+
+    def _load_settings(self) -> None:
+        folder = self._settings.value("write/folder", "", type=str)
+        gw_path = self._settings.value("write/gw_path", "", type=str)
+        verify = self._settings.value("write/verify", True, type=bool)
+        extra_flags = self._settings.value("write/extra_flags", "", type=str)
+
+        format_expanded = self._settings.value("write/format_expanded", False, type=bool)
+        custom_enabled = self._settings.value("write/custom_format_enabled", False, type=bool)
+        custom_text = self._settings.value("write/custom_format_text", "", type=str)
+        selected_format = self._settings.value("write/selected_format", "ibm.1440", type=str)
+
+        if gw_path:
+            self.gw_path_input.setText(gw_path)
+
+        self.verify_checkbox.setChecked(verify)
+        self.extra_flags_input.setText(extra_flags)
+
+        if format_expanded and not self._all_formats_loaded:
+            self._all_formats_loaded = True
+            self._populate_format_combo()
+
+        combo_index = self.format_combo.findText(selected_format)
+        if combo_index >= 0:
+            self.format_combo.setCurrentIndex(combo_index)
+
+        self.custom_format_checkbox.setChecked(custom_enabled)
+        self.custom_format_input.setText(custom_text)
+        self._on_custom_format_toggled(custom_enabled)
+
+        if folder:
+            folder_path = Path(folder)
+            self.folder_input.setText(folder)
+            if folder_path.exists() and folder_path.is_dir():
+                self._set_watched_folder(folder)
+                self._scan_folder()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -363,6 +434,7 @@ class WriteImagesTab(QWidget):
         self.folder_input.setText(folder_str)
         self._set_watched_folder(folder_str)
         self._scan_folder()
+        self._save_settings()
 
     def _select_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select image folder")
@@ -370,6 +442,7 @@ class WriteImagesTab(QWidget):
             self.folder_input.setText(folder)
             self._set_watched_folder(folder)
             self._scan_folder()
+            self._save_settings()
 
     def _scan_folder(self) -> None:
         folder_text = self.folder_input.text().strip()
@@ -425,8 +498,8 @@ class WriteImagesTab(QWidget):
         try:
             for disk_index, image_path in enumerate(disk_files, start=1):
                 if not self._prompt_continue(
-                    title="Insert Disk",
-                    message=f"Insert floppy for Disk {disk_index} and click Continue.",
+                        title="Insert Disk",
+                        message=f"Insert floppy for Disk {disk_index} and click Continue.",
                 ):
                     self._append_log("Write workflow stopped by user.")
                     return
@@ -517,6 +590,7 @@ class WriteImagesTab(QWidget):
         if restored_index >= 0:
             self.format_combo.setCurrentIndex(restored_index)
 
+        self._save_settings()
         QTimer.singleShot(0, self.format_combo.showPopup)
 
     def _on_custom_format_toggled(self, checked: bool) -> None:
@@ -524,6 +598,7 @@ class WriteImagesTab(QWidget):
         self.custom_format_input.setEnabled(checked)
         if checked and not self.custom_format_input.text().strip():
             self.custom_format_input.setText(self._selected_dropdown_format())
+        self._save_settings()
 
     def _selected_dropdown_format(self) -> str:
         current_text = self.format_combo.currentText().strip()
@@ -630,6 +705,7 @@ class WriteImagesTab(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Select gw executable")
         if path:
             self.gw_path_input.setText(path)
+            self._save_settings()
 
     def _move_selected_up(self) -> None:
         current = self.file_list.currentRow()
@@ -739,8 +815,8 @@ class CreateImagesTab(QWidget):
         try:
             for disk_index in range(1, disk_count + 1):
                 if not self._prompt_continue(
-                    title="Insert Source Disk",
-                    message=f"Insert source floppy for Disk {disk_index} and click Continue.",
+                        title="Insert Source Disk",
+                        message=f"Insert source floppy for Disk {disk_index} and click Continue.",
                 ):
                     self._append_log("Create workflow stopped by user.")
                     return
