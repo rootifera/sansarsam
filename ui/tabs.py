@@ -690,8 +690,8 @@ class WriteImagesTab(QWidget):
         self.start_btn.setEnabled(not busy)
 
     def _run_command_with_progress(self, command: list[str]):
-        progress = QProgressDialog("Running gw command...", "Abort", 0, 0, self)
-        progress.setWindowTitle("Greaseweazle Running")
+        progress = QProgressDialog("Writing image...", "Abort", 0, 0, self)
+        progress.setWindowTitle("Running")
         progress.setWindowModality(Qt.ApplicationModal)
         progress.setMinimumDuration(0)
 
@@ -1152,8 +1152,8 @@ class CreateImagesTab(QWidget):
         self.start_btn.setEnabled(not busy)
 
     def _run_command_with_progress(self, command: list[str]):
-        progress = QProgressDialog("Running gw command...", "Abort", 0, 0, self)
-        progress.setWindowTitle("Greaseweazle Running")
+        progress = QProgressDialog("Creating image...", "Abort", 0, 0, self)
+        progress.setWindowTitle("Running")
         progress.setWindowModality(Qt.ApplicationModal)
         progress.setMinimumDuration(0)
 
