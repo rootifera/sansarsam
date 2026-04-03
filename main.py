@@ -3,16 +3,28 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "sansarsam.app"
+        )
+
     app = QApplication(sys.argv)
+
+    app.setWindowIcon(QIcon("assets/icon.png"))
+
     QCoreApplication.setOrganizationName("Sansarsam")
     QCoreApplication.setApplicationName("Sansarsam")
+
     window = MainWindow()
+    window.setWindowIcon(QIcon("assets/icon.png"))
     window.show()
     return app.exec()
 
