@@ -324,7 +324,9 @@ class WriteImagesTab(QWidget):
         worker.finished.connect(lambda result: result_holder.setdefault("result", result))
         worker.finished.connect(loop.quit)
         thread.started.connect(worker.run)
-        progress.canceled.connect(worker.cancel)
+        progress.canceled.connect(
+            lambda: (self._append_log("[abort requested]"), worker.cancel())
+        )
 
         thread.start()
         progress.show()
@@ -542,7 +544,9 @@ class CreateImagesTab(QWidget):
         worker.finished.connect(lambda result: result_holder.setdefault("result", result))
         worker.finished.connect(loop.quit)
         thread.started.connect(worker.run)
-        progress.canceled.connect(worker.cancel)
+        progress.canceled.connect(
+            lambda: (self._append_log("[abort requested]"), worker.cancel())
+        )
 
         thread.start()
         progress.show()
