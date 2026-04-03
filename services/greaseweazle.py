@@ -13,6 +13,8 @@ LogCallback = Callable[[str], None]
 class CommandResult:
     command: list[str]
     return_code: int
+    cancelled: bool = False
+    output_lines: list[str] | None = None
 
 
 def build_write_command(
@@ -50,24 +52,39 @@ def build_read_command(
     return command
 
 
-def run_command(command: list[str], log_callback: LogCallback) -> CommandResult:
+def run_command(
+    command: list[str],
+    log_callback: LogCallback,
+    on_process_started: Callable[[subprocess.Popen[str]], None] | None = None,
+) -> CommandResult:
     log_callback(f"$ {' '.join(command)}")
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        message = f"[error] Command not found: {command[0]}"
+        log_callback(message)
+        return CommandResult(command=command, return_code=127, output_lines=[message])
+
+    if on_process_started is not None:
+        on_process_started(process)
 
     assert process.stdout is not None
+    output_lines: list[str] = []
     for line in process.stdout:
-        log_callback(line.rstrip())
+        stripped = line.rstrip()
+        output_lines.append(stripped)
+        log_callback(stripped)
 
     return_code = process.wait()
     log_callback(f"[exit code: {return_code}]")
-    return CommandResult(command=command, return_code=return_code)
+    return CommandResult(command=command, return_code=return_code, output_lines=output_lines)
 
 
 def _split_extra_flags(extra_flags: str) -> list[str]:

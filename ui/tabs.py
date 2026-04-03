@@ -19,12 +19,15 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QProgressDialog,
     QPlainTextEdit,
     QSpinBox,
     QVBoxLayout,
     QWidget,
     QFileDialog,
 )
+from PySide6.QtCore import QObject, QEventLoop, QThread, Signal
+import subprocess
 
 from services.greaseweazle import build_read_command, build_write_command, run_command
 
@@ -36,6 +39,44 @@ class DiskAction:
     retry: bool = False
     skip: bool = False
     abort: bool = False
+
+
+class CommandWorker(QObject):
+    output = Signal(str)
+    finished = Signal(object)
+
+    def __init__(self, command: list[str]) -> None:
+        super().__init__()
+        self._command = command
+        self._process: subprocess.Popen[str] | None = None
+        self._cancelled = False
+
+    def run(self) -> None:
+        result = run_command(
+            self._command,
+            self.output.emit,
+            on_process_started=self._set_process,
+        )
+        if self._cancelled:
+            result.cancelled = True
+            if result.return_code == 0:
+                result.return_code = -1
+        self.finished.emit(result)
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        if self._process is None:
+            return
+        if self._process.poll() is not None:
+            return
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+
+    def _set_process(self, process: subprocess.Popen[str]) -> None:
+        self._process = process
 
 
 class WriteImagesTab(QWidget):
@@ -159,8 +200,24 @@ class WriteImagesTab(QWidget):
                         extra_flags=self.extra_flags_input.text(),
                         gw_executable=self.gw_path_input.text().strip() or "gw",
                     )
-                    result = run_command(command, self._append_log)
+                    result = self._run_command_with_progress(command)
+                    if result.cancelled:
+                        self._append_log("Write workflow aborted by user during command execution.")
+                        return
                     if result.return_code == 0:
+                        if self._looks_like_cli_failure(result.output_lines):
+                            self._append_log(
+                                f"Disk {disk_index}: command output indicates a failure."
+                            )
+                            action = self._failure_action(disk_index)
+                            if action.retry:
+                                continue
+                            if action.skip:
+                                self._append_log(f"Disk {disk_index}: skipped after error.")
+                                break
+                            if action.abort:
+                                self._append_log("Write workflow aborted.")
+                                return
                         self._append_log(f"Disk {disk_index}: completed.")
                         break
 
@@ -217,6 +274,42 @@ class WriteImagesTab(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.start_btn.setEnabled(not busy)
+
+    def _run_command_with_progress(self, command: list[str]):
+        progress = QProgressDialog("Running gw command...", "Abort", 0, 0, self)
+        progress.setWindowTitle("Greaseweazle Running")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        thread = QThread(self)
+        worker = CommandWorker(command)
+        worker.moveToThread(thread)
+
+        result_holder: dict[str, object] = {}
+        loop = QEventLoop(self)
+
+        worker.output.connect(self._append_log)
+        worker.finished.connect(lambda result: result_holder.setdefault("result", result))
+        worker.finished.connect(loop.quit)
+        thread.started.connect(worker.run)
+        progress.canceled.connect(worker.cancel)
+
+        thread.start()
+        progress.show()
+        loop.exec()
+
+        progress.hide()
+        thread.quit()
+        thread.wait()
+
+        return result_holder["result"]
+
+    def _looks_like_cli_failure(self, output_lines: list[str] | None) -> bool:
+        if not output_lines:
+            return False
+        error_markers = ("error", "failed", "no flux", "no index", "no disk")
+        lowered = " ".join(output_lines).lower()
+        return any(marker in lowered for marker in error_markers)
 
     def _select_gw_path(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select gw executable")
@@ -347,8 +440,37 @@ class CreateImagesTab(QWidget):
                         extra_flags=self.extra_flags_input.text(),
                         gw_executable=self.gw_path_input.text().strip() or "gw",
                     )
-                    result = run_command(command, self._append_log)
+                    result = self._run_command_with_progress(command)
+                    if result.cancelled:
+                        self._append_log("Create workflow aborted by user during command execution.")
+                        return
                     if result.return_code == 0:
+                        if self._looks_like_cli_failure(result.output_lines):
+                            self._append_log(
+                                f"Disk {disk_index}: command output indicates a failure."
+                            )
+                            action = self._failure_action(disk_index)
+                            if action.retry:
+                                continue
+                            if action.skip:
+                                self._append_log(f"Disk {disk_index}: skipped after error.")
+                                break
+                            if action.abort:
+                                self._append_log("Create workflow aborted.")
+                                return
+                        if not output_file.exists() or output_file.stat().st_size == 0:
+                            self._append_log(
+                                f"Disk {disk_index}: output image was not created correctly."
+                            )
+                            action = self._failure_action(disk_index)
+                            if action.retry:
+                                continue
+                            if action.skip:
+                                self._append_log(f"Disk {disk_index}: skipped after error.")
+                                break
+                            if action.abort:
+                                self._append_log("Create workflow aborted.")
+                                return
                         self._append_log(f"Disk {disk_index}: image created at {output_file}.")
                         break
 
@@ -370,6 +492,42 @@ class CreateImagesTab(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.start_btn.setEnabled(not busy)
+
+    def _run_command_with_progress(self, command: list[str]):
+        progress = QProgressDialog("Running gw command...", "Abort", 0, 0, self)
+        progress.setWindowTitle("Greaseweazle Running")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        thread = QThread(self)
+        worker = CommandWorker(command)
+        worker.moveToThread(thread)
+
+        result_holder: dict[str, object] = {}
+        loop = QEventLoop(self)
+
+        worker.output.connect(self._append_log)
+        worker.finished.connect(lambda result: result_holder.setdefault("result", result))
+        worker.finished.connect(loop.quit)
+        thread.started.connect(worker.run)
+        progress.canceled.connect(worker.cancel)
+
+        thread.start()
+        progress.show()
+        loop.exec()
+
+        progress.hide()
+        thread.quit()
+        thread.wait()
+
+        return result_holder["result"]
+
+    def _looks_like_cli_failure(self, output_lines: list[str] | None) -> bool:
+        if not output_lines:
+            return False
+        error_markers = ("error", "failed", "no flux", "no index", "no disk")
+        lowered = " ".join(output_lines).lower()
+        return any(marker in lowered for marker in error_markers)
 
     def _select_gw_path(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select gw executable")
