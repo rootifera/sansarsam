@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+import os
+import shutil
 import subprocess
+import sys
 
 
 LogCallback = Callable[[str], None]
@@ -15,6 +18,47 @@ class CommandResult:
     return_code: int
     cancelled: bool = False
     output_lines: list[str] | None = None
+
+
+def detect_gw_executable() -> str:
+    candidates: list[str] = []
+
+    preferred_names = ["gw"]
+    if sys.platform.startswith("win"):
+        preferred_names.insert(0, "gw.exe")
+
+    for name in preferred_names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    app_dir = Path(sys.argv[0]).resolve().parent
+    search_dirs = [Path.cwd(), app_dir]
+
+    env_path = os.environ.get("GREASEWEAZLE_PATH", "").strip()
+    if env_path:
+        search_dirs.append(Path(env_path).expanduser())
+
+    candidate_filenames = ["gw"]
+    if sys.platform.startswith("win"):
+        candidate_filenames = ["gw.exe", "gw"]
+
+    seen: set[Path] = set()
+    for directory in search_dirs:
+        try:
+            resolved_dir = directory.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved_dir in seen or not resolved_dir.exists() or not resolved_dir.is_dir():
+            continue
+        seen.add(resolved_dir)
+
+        for filename in candidate_filenames:
+            candidate = resolved_dir / filename
+            if candidate.is_file():
+                return str(candidate)
+
+    return "gw.exe" if sys.platform.startswith("win") else "gw"
 
 
 def build_write_command(

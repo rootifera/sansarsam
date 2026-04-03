@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from PySide6.QtCore import Qt, QFileSystemWatcher
+from PySide6.QtCore import Qt, QFileSystemWatcher, QTimer
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -29,9 +29,157 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QObject, QEventLoop, QThread, Signal
 import subprocess
 
-from services.greaseweazle import build_read_command, build_write_command, run_command
+from services.greaseweazle import (
+    build_read_command,
+    build_write_command,
+    run_command,
+    detect_gw_executable,
+)
 
 SUPPORTED_IMAGE_SUFFIXES = {".img", ".ima", ".scp", ".raw"}
+
+COMMON_GW_FORMATS = [
+    "ibm.1440",
+    "ibm.720",
+    "ibm.1200",
+    "ibm.360",
+    "amiga.amigados",
+    "amiga.amigados_hd",
+    "atarist.720",
+    "commodore.1541",
+    "apple2.prodos.140",
+    "pc98.2hd",
+]
+
+ALL_GW_FORMATS = [
+    "acorn.adfs.160",
+    "acorn.adfs.1600",
+    "acorn.adfs.320",
+    "acorn.adfs.640",
+    "acorn.adfs.800",
+    "acorn.dfs.ds",
+    "acorn.dfs.ds80",
+    "acorn.dfs.ss",
+    "acorn.dfs.ss80",
+    "akai.1600",
+    "akai.800",
+    "amiga.amigados",
+    "amiga.amigados_hd",
+    "apple2.appledos.140",
+    "apple2.nofs.140",
+    "apple2.prodos.140",
+    "atari.90",
+    "atarist.360",
+    "atarist.400",
+    "atarist.440",
+    "atarist.720",
+    "atarist.800",
+    "atarist.880",
+    "coco.decb",
+    "coco.decb.40t",
+    "coco.os9.40ds",
+    "coco.os9.40ss",
+    "coco.os9.80ds",
+    "coco.os9.80ss",
+    "commodore.1541",
+    "commodore.1571",
+    "commodore.1581",
+    "commodore.cmd.fd2000.dd",
+    "commodore.cmd.fd2000.hd",
+    "commodore.cmd.fd4000.ed",
+    "dec.rx01",
+    "dec.rx02",
+    "dragon.40ds",
+    "dragon.40ss",
+    "dragon.80ds",
+    "dragon.80ss",
+    "ensoniq.1600",
+    "ensoniq.800",
+    "ensoniq.mirage",
+    "epson.qx10.320",
+    "epson.qx10.396",
+    "epson.qx10.399",
+    "epson.qx10.400",
+    "epson.qx10.booter",
+    "epson.qx10.logo",
+    "gem.1600",
+    "hp.mmfm.9885",
+    "hp.mmfm.9895",
+    "ibm.1200",
+    "ibm.1440",
+    "ibm.160",
+    "ibm.1680",
+    "ibm.180",
+    "ibm.2880",
+    "ibm.320",
+    "ibm.360",
+    "ibm.720",
+    "ibm.800",
+    "ibm.dmf",
+    "ibm.scan",
+    "mac.400",
+    "mac.800",
+    "micropolis.100tpi.ds",
+    "micropolis.100tpi.ds.275",
+    "micropolis.100tpi.ss",
+    "micropolis.100tpi.ss.275",
+    "micropolis.48tpi.ds",
+    "micropolis.48tpi.ds.275",
+    "micropolis.48tpi.ss",
+    "micropolis.48tpi.ss.275",
+    "mm1.os9.80dshd_32",
+    "mm1.os9.80dshd_33",
+    "mm1.os9.80dshd_36",
+    "mm1.os9.80dshd_37",
+    "msx.1d",
+    "msx.1dd",
+    "msx.2d",
+    "msx.2dd",
+    "northstar.fm.ds",
+    "northstar.fm.ss",
+    "northstar.mfm.ds",
+    "northstar.mfm.ss",
+    "occ1.dd",
+    "occ1.sd",
+    "olivetti.m20",
+    "pc98.2d",
+    "pc98.2dd",
+    "pc98.2hd",
+    "pc98.2hs",
+    "pc98.n88basic.hd",
+    "raw.125",
+    "raw.250",
+    "raw.500",
+    "sci.prophet",
+    "sega.sf7000",
+    "thomson.1s160",
+    "thomson.1s320",
+    "thomson.1s80",
+    "thomson.2s160",
+    "thomson.2s320",
+    "tsc.flex.dsdd",
+    "tsc.flex.ssdd",
+    "zx.3dos.ds80",
+    "zx.3dos.ss40",
+    "zx.d80.ds80",
+    "zx.fdd3000.ds80",
+    "zx.fdd3000.ss40",
+    "zx.kempston.ds80",
+    "zx.kempston.ss40",
+    "zx.opus.ds80",
+    "zx.opus.ss40",
+    "zx.plusd.ds80",
+    "zx.quorum.ds80",
+    "zx.rocky.ds80",
+    "zx.rocky.ss40",
+    "zx.trdos.ds80",
+    "zx.turbodrive.ds40",
+    "zx.turbodrive.ds80",
+    "zx.watford.ds80",
+    "zx.watford.ss40",
+]
+
+LOAD_MORE_FORMATS_TEXT = "Load more..."
 
 
 @dataclass
@@ -82,6 +230,7 @@ class CommandWorker(QObject):
 class WriteImagesTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self.setAcceptDrops(True)
         self._folder_watcher = QFileSystemWatcher(self)
         self._folder_watcher.directoryChanged.connect(self._on_watched_folder_changed)
         self._build_ui()
@@ -104,7 +253,7 @@ class WriteImagesTab(QWidget):
         layout.addLayout(folder_row)
 
         gw_row = QHBoxLayout()
-        self.gw_path_input = QLineEdit("gw")
+        self.gw_path_input = QLineEdit(detect_gw_executable())
         gw_browse_btn = QPushButton("Browse gw")
         gw_browse_btn.clicked.connect(self._select_gw_path)
         gw_row.addWidget(QLabel("gw executable:"))
@@ -129,16 +278,48 @@ class WriteImagesTab(QWidget):
 
         options_group = QGroupBox("Options")
         options_layout = QFormLayout(options_group)
-        self.format_input = QLineEdit("ibm.1440")
+        self._all_formats_loaded = False
+        self.format_combo = QComboBox()
+        self.custom_format_checkbox = QCheckBox("Use custom format")
+        self.custom_format_input = QLineEdit()
+        self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
+        self.custom_format_input.setEnabled(False)
+        self._populate_format_combo()
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
+
         self.verify_checkbox = QCheckBox("Verify")
         self.verify_checkbox.setChecked(True)
         self.extra_flags_input = QLineEdit()
-        options_layout.addRow("Format:", self.format_input)
+        options_layout.addRow("Disk format:", self.format_combo)
+        options_layout.addRow("Custom:", self.custom_format_checkbox)
+        options_layout.addRow("Custom format string:", self.custom_format_input)
         options_layout.addRow("Verify:", self.verify_checkbox)
         options_layout.addRow("Extra flags:", self.extra_flags_input)
         layout.addWidget(options_group)
 
-        self.start_btn = QPushButton("Start")
+        self.start_btn = QPushButton("Start Writing")
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setStyleSheet("""
+        QPushButton {
+            background-color: rgb(58, 110, 165);
+            color: white;
+            font-weight: bold;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid rgb(40, 80, 120);
+        }
+        QPushButton:hover {
+            background-color: rgb(70, 125, 185);
+        }
+        QPushButton:pressed {
+            background-color: rgb(40, 90, 140);
+        }
+        QPushButton:disabled {
+            background-color: rgb(140, 140, 140);
+            color: rgb(220, 220, 220);
+        }
+        """)
         self.start_btn.clicked.connect(self._start_write)
         layout.addWidget(self.start_btn)
 
@@ -146,6 +327,42 @@ class WriteImagesTab(QWidget):
         self.log.setReadOnly(True)
         layout.addWidget(QLabel("Log:"))
         layout.addWidget(self.log, 1)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+
+        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        if not paths:
+            return
+
+        # Folder dropped
+        for path in paths:
+            if path.is_dir():
+                self._set_folder_from_drop(path)
+                return
+
+        # File dropped → use parent folder
+        first_file = paths[0]
+        if first_file.is_file():
+            self._set_folder_from_drop(first_file.parent)
+
+    def _set_folder_from_drop(self, folder: Path):
+        folder_str = str(folder)
+
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        self.folder_input.setText(folder_str)
+        self._set_watched_folder(folder_str)
+        self._scan_folder()
 
     def _select_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select image folder")
@@ -217,7 +434,7 @@ class WriteImagesTab(QWidget):
                 while True:
                     command = build_write_command(
                         image_path=image_path,
-                        fmt=self.format_input.text(),
+                        fmt=self._selected_format(),
                         verify=self.verify_checkbox.isChecked(),
                         extra_flags=self.extra_flags_input.text(),
                         gw_executable=self.gw_path_input.text().strip() or "gw",
@@ -254,6 +471,70 @@ class WriteImagesTab(QWidget):
                         return
         finally:
             self._set_busy(False)
+
+    def _populate_format_combo(self) -> None:
+        current_value = self.format_combo.currentText().strip()
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self.format_combo.addItems(COMMON_GW_FORMATS)
+        if self._all_formats_loaded:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            for fmt in ALL_GW_FORMATS:
+                if fmt not in COMMON_GW_FORMATS:
+                    self.format_combo.addItem(fmt)
+        else:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            self.format_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.format_combo.findText(current_value)
+            if index >= 0:
+                self.format_combo.setCurrentIndex(index)
+            else:
+                default_index = self.format_combo.findText("ibm.1440")
+                self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        else:
+            default_index = self.format_combo.findText("ibm.1440")
+            self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        self.format_combo.blockSignals(False)
+
+    def _on_format_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self.format_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_format = "ibm.1440"
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            previous_format = current_text
+        elif index > 0:
+            previous_format = self.format_combo.itemText(index - 1)
+
+        self._all_formats_loaded = True
+        self._populate_format_combo()
+        restored_index = self.format_combo.findText(previous_format)
+        if restored_index >= 0:
+            self.format_combo.setCurrentIndex(restored_index)
+
+        QTimer.singleShot(0, self.format_combo.showPopup)
+
+    def _on_custom_format_toggled(self, checked: bool) -> None:
+        self.format_combo.setEnabled(not checked)
+        self.custom_format_input.setEnabled(checked)
+        if checked and not self.custom_format_input.text().strip():
+            self.custom_format_input.setText(self._selected_dropdown_format())
+
+    def _selected_dropdown_format(self) -> str:
+        current_text = self.format_combo.currentText().strip()
+        if current_text == LOAD_MORE_FORMATS_TEXT:
+            return "ibm.1440"
+        return current_text
+
+    def _selected_format(self) -> str:
+        if self.custom_format_checkbox.isChecked():
+            return self.custom_format_input.text().strip()
+        return self._selected_dropdown_format()
 
     def _collect_disk_files(self) -> list[Path]:
         files: list[Path] = []
@@ -386,7 +667,7 @@ class CreateImagesTab(QWidget):
         root.addLayout(destination_row)
 
         gw_row = QHBoxLayout()
-        self.gw_path_input = QLineEdit("gw")
+        self.gw_path_input = QLineEdit(detect_gw_executable())
         gw_browse_btn = QPushButton("Browse gw")
         gw_browse_btn.clicked.connect(self._select_gw_path)
         gw_row.addWidget(QLabel("gw executable:"))
