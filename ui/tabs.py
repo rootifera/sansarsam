@@ -272,16 +272,6 @@ class WriteImagesTab(QWidget):
 
         layout.addLayout(folder_row)
 
-        gw_row = QHBoxLayout()
-        self.gw_path_input = QLineEdit(detect_gw_executable())
-        self.gw_path_input.textChanged.connect(self._save_settings)
-        gw_browse_btn = QPushButton("Browse gw")
-        gw_browse_btn.clicked.connect(self._select_gw_path)
-        gw_row.addWidget(QLabel("gw executable:"))
-        gw_row.addWidget(self.gw_path_input, 1)
-        gw_row.addWidget(gw_browse_btn)
-        layout.addLayout(gw_row)
-
         self.file_list = QListWidget()
         self.file_list.setDragDropMode(QListWidget.InternalMove)
         layout.addWidget(QLabel("Detected Images (drag to reorder):"))
@@ -375,8 +365,8 @@ class WriteImagesTab(QWidget):
     def _save_settings(self) -> None:
         if self._loading_settings:
             return
+
         self._settings.setValue("write/folder", self.folder_input.text().strip())
-        self._settings.setValue("write/gw_path", self.gw_path_input.text().strip())
         self._settings.setValue("write/verify", self.verify_checkbox.isChecked())
         self._settings.setValue("write/extra_flags", self.extra_flags_input.text())
 
@@ -396,7 +386,6 @@ class WriteImagesTab(QWidget):
     def _load_settings(self) -> None:
         self._loading_settings = True
         folder = self._settings.value("write/folder", "", type=str)
-        gw_path = self._settings.value("write/gw_path", "", type=str)
         verify = self._settings.value("write/verify", True, type=bool)
         extra_flags = self._settings.value("write/extra_flags", "", type=str)
 
@@ -404,8 +393,6 @@ class WriteImagesTab(QWidget):
         custom_text = self._settings.value("write/custom_format_text", "", type=str)
         selected_format = self._settings.value("write/selected_format", "ibm.1440", type=str)
 
-        if gw_path:
-            self.gw_path_input.setText(gw_path)
 
         self.verify_checkbox.setChecked(verify)
         self.extra_flags_input.setText(extra_flags)
@@ -538,7 +525,7 @@ class WriteImagesTab(QWidget):
                         fmt=self._selected_format(),
                         verify=self.verify_checkbox.isChecked(),
                         extra_flags=self.extra_flags_input.text(),
-                        gw_executable=self.gw_path_input.text().strip() or "gw",
+                        gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
                     )
                     result = self._run_command_with_progress(command)
                     if result.cancelled:
@@ -729,12 +716,6 @@ class WriteImagesTab(QWidget):
         lowered = " ".join(output_lines).lower()
         return any(marker in lowered for marker in error_markers)
 
-    def _select_gw_path(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select gw executable")
-        if path:
-            self.gw_path_input.setText(path)
-            self._save_settings()
-
     def _move_selected_up(self) -> None:
         current = self.file_list.currentRow()
         if current <= 0:
@@ -804,13 +785,124 @@ class WriteImagesTab(QWidget):
 class CreateImagesTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._settings = QSettings()
+        self._loading_settings = False
+        self.setAcceptDrops(True)
         self._build_ui()
+        self._load_settings()
+
+        self._settings.setValue("create/label", self.label_input.text())
+        self._settings.setValue("create/disk_count", self.disk_count_input.value())
+        self._settings.setValue("create/output_type", self.output_type_combo.currentText())
+        self._settings.setValue("create/output_folder", self.output_folder_input.text().strip())
+        self._settings.setValue("create/extra_flags", self.extra_flags_input.text())
+
+        self._settings.setValue(
+            "create/custom_format_enabled",
+            self.custom_format_checkbox.isChecked(),
+        )
+        self._settings.setValue(
+            "create/custom_format_text",
+            self.custom_format_input.text(),
+        )
+
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            self._settings.setValue("create/selected_format", current_text)
+
+    def _save_settings(self) -> None:
+        if self._loading_settings:
+            return
+
+        self._settings.setValue("create/label", self.label_input.text())
+        self._settings.setValue("create/disk_count", self.disk_count_input.value())
+        self._settings.setValue("create/output_type", self.output_type_combo.currentText())
+        self._settings.setValue("create/output_folder", self.output_folder_input.text().strip())
+        self._settings.setValue("create/extra_flags", self.extra_flags_input.text())
+
+        self._settings.setValue(
+            "create/custom_format_enabled",
+            self.custom_format_checkbox.isChecked(),
+        )
+        self._settings.setValue(
+            "create/custom_format_text",
+            self.custom_format_input.text(),
+        )
+
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            self._settings.setValue("create/selected_format", current_text)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+
+        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        if not paths:
+            return
+
+        for path in paths:
+            if path.is_dir():
+                self._set_output_folder_from_drop(path)
+                return
+
+        first_file = paths[0]
+        if first_file.is_file():
+            self._set_output_folder_from_drop(first_file.parent)
+
+    def _set_output_folder_from_drop(self, folder: Path) -> None:
+        folder_str = str(folder)
+
+        if not folder.exists() or not folder.is_dir():
+            return
+
+        self.output_folder_input.setText(folder_str)
+        self._save_settings()
+
+    def _load_settings(self) -> None:
+        self._loading_settings = True
+
+        label = self._settings.value("create/label", "", type=str)
+        disk_count = self._settings.value("create/disk_count", 1, type=int)
+        output_type = self._settings.value("create/output_type", "IMG", type=str)
+        output_folder = self._settings.value("create/output_folder", "", type=str)
+        extra_flags = self._settings.value("create/extra_flags", "", type=str)
+        custom_enabled = self._settings.value("create/custom_format_enabled", False, type=bool)
+        custom_text = self._settings.value("create/custom_format_text", "", type=str)
+        selected_format = self._settings.value("create/selected_format", "ibm.1440", type=str)
+
+        self.label_input.setText(label)
+        self.disk_count_input.setValue(disk_count)
+        self.output_folder_input.setText(output_folder)
+        self.extra_flags_input.setText(extra_flags)
+
+        output_type_index = self.output_type_combo.findText(output_type)
+        if output_type_index >= 0:
+            self.output_type_combo.setCurrentIndex(output_type_index)
+
+        format_index = self.format_combo.findText(selected_format)
+        if format_index >= 0:
+            self.format_combo.setCurrentIndex(format_index)
+
+        self.custom_format_checkbox.setChecked(custom_enabled)
+        self.custom_format_input.setText(custom_text)
+        self._on_custom_format_toggled(custom_enabled)
+
+        self._loading_settings = False
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
         destination_row = QHBoxLayout()
         self.output_folder_input = QLineEdit()
+        self.output_folder_input.textChanged.connect(self._save_settings)
         self.output_folder_input.setReadOnly(True)
         select_output_btn = QPushButton("Select Output Folder")
         select_output_btn.clicked.connect(self._select_output_folder)
@@ -819,28 +911,36 @@ class CreateImagesTab(QWidget):
         destination_row.addWidget(select_output_btn)
         root.addLayout(destination_row)
 
-        gw_row = QHBoxLayout()
-        self.gw_path_input = QLineEdit(detect_gw_executable())
-        gw_browse_btn = QPushButton("Browse gw")
-        gw_browse_btn.clicked.connect(self._select_gw_path)
-        gw_row.addWidget(QLabel("gw executable:"))
-        gw_row.addWidget(self.gw_path_input, 1)
-        gw_row.addWidget(gw_browse_btn)
-        root.addLayout(gw_row)
-
         details_group = QGroupBox("Image Details")
         details_layout = QGridLayout(details_group)
 
         self.label_input = QLineEdit()
+        self.label_input.textChanged.connect(self._save_settings)
         self.disk_count_input = QSpinBox()
         self.disk_count_input.setMinimum(1)
         self.disk_count_input.setValue(1)
+        self.disk_count_input.valueChanged.connect(self._save_settings)
 
         self.output_type_combo = QComboBox()
         self.output_type_combo.addItems(["IMG", "SCP"])
+        self.output_type_combo.currentIndexChanged.connect(self._save_settings)
 
-        self.format_input = QLineEdit("ibm.1440")
+        self._all_formats_loaded = False
+        self.format_combo = QComboBox()
+        self.custom_format_checkbox = QCheckBox("Use custom format")
+        self.custom_format_input = QLineEdit()
+        self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
+        self.custom_format_input.setEnabled(False)
+        self.custom_format_input.textChanged.connect(self._save_settings)
+
+        self._populate_format_combo()
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.format_combo.currentIndexChanged.connect(self._save_settings)
+        self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
+        self.custom_format_checkbox.toggled.connect(self._save_settings)
+
         self.extra_flags_input = QLineEdit()
+        self.extra_flags_input.textChanged.connect(self._save_settings)
 
         details_layout.addWidget(QLabel("Label:"), 0, 0)
         details_layout.addWidget(self.label_input, 0, 1)
@@ -848,14 +948,38 @@ class CreateImagesTab(QWidget):
         details_layout.addWidget(self.disk_count_input, 1, 1)
         details_layout.addWidget(QLabel("Output type:"), 2, 0)
         details_layout.addWidget(self.output_type_combo, 2, 1)
-        details_layout.addWidget(QLabel("Format (IMG):"), 3, 0)
-        details_layout.addWidget(self.format_input, 3, 1)
-        details_layout.addWidget(QLabel("Extra flags:"), 4, 0)
-        details_layout.addWidget(self.extra_flags_input, 4, 1)
+        details_layout.addWidget(QLabel("Disk format:"), 3, 0)
+        details_layout.addWidget(self.format_combo, 3, 1)
+        details_layout.addWidget(self.custom_format_checkbox, 4, 1)
+        details_layout.addWidget(QLabel("Custom format string:"), 5, 0)
+        details_layout.addWidget(self.custom_format_input, 5, 1)
+        details_layout.addWidget(QLabel("Extra flags:"), 6, 0)
+        details_layout.addWidget(self.extra_flags_input, 6, 1)
 
         root.addWidget(details_group)
 
-        self.start_btn = QPushButton("Start")
+        self.start_btn = QPushButton("Start Reading")
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setStyleSheet("""
+        QPushButton {
+            background-color: rgb(58, 110, 165);
+            color: white;
+            font-weight: bold;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid rgb(40, 80, 120);
+        }
+        QPushButton:hover {
+            background-color: rgb(70, 125, 185);
+        }
+        QPushButton:pressed {
+            background-color: rgb(40, 90, 140);
+        }
+        QPushButton:disabled {
+            background-color: rgb(140, 140, 140);
+            color: rgb(220, 220, 220);
+        }
+        """)
         self.start_btn.clicked.connect(self._start_create)
         root.addWidget(self.start_btn)
 
@@ -868,6 +992,7 @@ class CreateImagesTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select output folder")
         if folder:
             self.output_folder_input.setText(folder)
+            self._save_settings()
 
     def _start_create(self) -> None:
         output_folder_text = self.output_folder_input.text().strip()
@@ -904,9 +1029,9 @@ class CreateImagesTab(QWidget):
                     command = build_read_command(
                         output_path=output_file,
                         output_type=output_type,
-                        fmt=self.format_input.text(),
+                        fmt=self._selected_format(),
                         extra_flags=self.extra_flags_input.text(),
-                        gw_executable=self.gw_path_input.text().strip() or "gw",
+                        gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
                     )
                     result = self._run_command_with_progress(command)
                     if result.cancelled:
@@ -999,11 +1124,6 @@ class CreateImagesTab(QWidget):
         lowered = " ".join(output_lines).lower()
         return any(marker in lowered for marker in error_markers)
 
-    def _select_gw_path(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select gw executable")
-        if path:
-            self.gw_path_input.setText(path)
-
     def _failure_action(self, disk_index: int) -> DiskAction:
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
@@ -1028,6 +1148,70 @@ class CreateImagesTab(QWidget):
         cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
         box.exec()
         return box.clickedButton() is continue_btn and box.clickedButton() is not cancel_btn
+
+    def _populate_format_combo(self) -> None:
+        current_value = self.format_combo.currentText().strip()
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self.format_combo.addItems(COMMON_GW_FORMATS)
+        if self._all_formats_loaded:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            for fmt in ALL_GW_FORMATS:
+                if fmt not in COMMON_GW_FORMATS:
+                    self.format_combo.addItem(fmt)
+        else:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            self.format_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.format_combo.findText(current_value)
+            if index >= 0:
+                self.format_combo.setCurrentIndex(index)
+            else:
+                default_index = self.format_combo.findText("ibm.1440")
+                self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        else:
+            default_index = self.format_combo.findText("ibm.1440")
+            self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        self.format_combo.blockSignals(False)
+
+    def _on_format_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self.format_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_format = "ibm.1440"
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            previous_format = current_text
+        elif index > 0:
+            previous_format = self.format_combo.itemText(index - 1)
+
+        self._all_formats_loaded = True
+        self._populate_format_combo()
+        restored_index = self.format_combo.findText(previous_format)
+        if restored_index >= 0:
+            self.format_combo.setCurrentIndex(restored_index)
+
+        QTimer.singleShot(0, self.format_combo.showPopup)
+
+    def _on_custom_format_toggled(self, checked: bool) -> None:
+        self.format_combo.setEnabled(not checked)
+        self.custom_format_input.setEnabled(checked)
+        if checked and not self.custom_format_input.text().strip():
+            self.custom_format_input.setText(self._selected_dropdown_format())
+
+    def _selected_dropdown_format(self) -> str:
+        current_text = self.format_combo.currentText().strip()
+        if current_text == LOAD_MORE_FORMATS_TEXT:
+            return "ibm.1440"
+        return current_text
+
+    def _selected_format(self) -> str:
+        if self.custom_format_checkbox.isChecked():
+            return self.custom_format_input.text().strip()
+        return self._selected_dropdown_format()
 
 
 def _disk_sort_key(path: Path) -> tuple[int, str]:
