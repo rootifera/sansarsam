@@ -36,7 +36,13 @@ from services.greaseweazle import (
     detect_gw_executable,
 )
 
-SUPPORTED_IMAGE_SUFFIXES = {".img", ".ima", ".scp", ".raw"}
+SUPPORTED_IMAGE_SUFFIXES = {
+    ".a2r", ".adf", ".ads", ".adm", ".adl", ".ctr", ".d1m", ".d2m", ".d4m",
+    ".d64", ".d71", ".d81", ".d88", ".dcp", ".dim", ".dmk", ".do", ".dsd",
+    ".dsk", ".edsk", ".fd", ".fdi", ".hdm", ".hfe", ".ima", ".img", ".imd",
+    ".ipf", ".mgt", ".msa", ".nfd", ".nsi", ".po", ".raw", ".sf7", ".scp",
+    ".ssd", ".st", ".td0", ".xdf"
+}
 
 COMMON_GW_FORMATS = [
     "ibm.1440",
@@ -231,11 +237,23 @@ class WriteImagesTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._settings = QSettings()
+        self._loading_settings = False
+        self._group_index = -1
         self.setAcceptDrops(True)
         self._folder_watcher = QFileSystemWatcher(self)
         self._folder_watcher.directoryChanged.connect(self._on_watched_folder_changed)
         self._build_ui()
         self._load_settings()
+
+    def _select_all_files(self) -> None:
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            item.setCheckState(Qt.Checked)
+
+    def _select_no_files(self) -> None:
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            item.setCheckState(Qt.Unchecked)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -272,10 +290,21 @@ class WriteImagesTab(QWidget):
         reorder_buttons = QHBoxLayout()
         move_up_btn = QPushButton("Move Up")
         move_down_btn = QPushButton("Move Down")
+        select_all_btn = QPushButton("Select All")
+        select_none_btn = QPushButton("Select None")
+        select_group_btn = QPushButton("Select Group")
+
         move_up_btn.clicked.connect(self._move_selected_up)
         move_down_btn.clicked.connect(self._move_selected_down)
+        select_all_btn.clicked.connect(self._select_all_files)
+        select_none_btn.clicked.connect(self._select_no_files)
+        select_group_btn.clicked.connect(self._select_next_group)
+
         reorder_buttons.addWidget(move_up_btn)
         reorder_buttons.addWidget(move_down_btn)
+        reorder_buttons.addWidget(select_all_btn)
+        reorder_buttons.addWidget(select_none_btn)
+        reorder_buttons.addWidget(select_group_btn)
         reorder_buttons.addStretch(1)
         layout.addLayout(reorder_buttons)
 
@@ -344,12 +373,13 @@ class WriteImagesTab(QWidget):
         layout.addWidget(self.log, 1)
 
     def _save_settings(self) -> None:
+        if self._loading_settings:
+            return
         self._settings.setValue("write/folder", self.folder_input.text().strip())
         self._settings.setValue("write/gw_path", self.gw_path_input.text().strip())
         self._settings.setValue("write/verify", self.verify_checkbox.isChecked())
         self._settings.setValue("write/extra_flags", self.extra_flags_input.text())
 
-        self._settings.setValue("write/format_expanded", self._all_formats_loaded)
         self._settings.setValue(
             "write/custom_format_enabled",
             self.custom_format_checkbox.isChecked(),
@@ -364,12 +394,12 @@ class WriteImagesTab(QWidget):
             self._settings.setValue("write/selected_format", current_text)
 
     def _load_settings(self) -> None:
+        self._loading_settings = True
         folder = self._settings.value("write/folder", "", type=str)
         gw_path = self._settings.value("write/gw_path", "", type=str)
         verify = self._settings.value("write/verify", True, type=bool)
         extra_flags = self._settings.value("write/extra_flags", "", type=str)
 
-        format_expanded = self._settings.value("write/format_expanded", False, type=bool)
         custom_enabled = self._settings.value("write/custom_format_enabled", False, type=bool)
         custom_text = self._settings.value("write/custom_format_text", "", type=str)
         selected_format = self._settings.value("write/selected_format", "ibm.1440", type=str)
@@ -379,10 +409,6 @@ class WriteImagesTab(QWidget):
 
         self.verify_checkbox.setChecked(verify)
         self.extra_flags_input.setText(extra_flags)
-
-        if format_expanded and not self._all_formats_loaded:
-            self._all_formats_loaded = True
-            self._populate_format_combo()
 
         combo_index = self.format_combo.findText(selected_format)
         if combo_index >= 0:
@@ -398,6 +424,8 @@ class WriteImagesTab(QWidget):
             if folder_path.exists() and folder_path.is_dir():
                 self._set_watched_folder(folder)
                 self._scan_folder()
+
+        self._loading_settings = False
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -722,6 +750,55 @@ class WriteImagesTab(QWidget):
         item = self.file_list.takeItem(current)
         self.file_list.insertItem(current + 1, item)
         self.file_list.setCurrentRow(current + 1)
+
+    def _get_groups(self) -> list[str]:
+        groups = []
+        seen = set()
+
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            path_value = item.data(Qt.UserRole)
+            if not path_value:
+                continue
+
+            group = self._group_name_from_path(path_value)
+
+            if group not in seen:
+                seen.add(group)
+                groups.append(group)
+
+        return groups
+
+    def _select_next_group(self) -> None:
+        groups = self._get_groups()
+        if not groups:
+            return
+
+        self._group_index = (self._group_index + 1) % len(groups)
+        target_group = groups[self._group_index]
+
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            path_value = item.data(Qt.UserRole)
+            if not path_value:
+                continue
+
+            group = self._group_name_from_path(path_value)
+
+            if group == target_group:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+
+    def _group_name_from_path(self, path_value) -> str:
+        name = Path(path_value).stem.lower()
+
+        name = re.sub(r"\s*\[[^\]]+\]", "", name)
+        name = re.sub(r"\s*\((?:disk|disc)\s*\d+\)", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\s*(?:disk|disc)\s*\d+", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\s+", " ", name).strip()
+
+        return name
 
 
 class CreateImagesTab(QWidget):

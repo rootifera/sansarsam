@@ -12,7 +12,7 @@ class MainWindow(QMainWindow):
         self.resize(900, 700)
 
         tabs = QTabWidget()
-        tabs.addTab(WriteImagesTab(), "Write Images")
-        tabs.addTab(CreateImagesTab(), "Create Images")
+        tabs.addTab(WriteImagesTab(), "Write to Disk")
+        tabs.addTab(CreateImagesTab(), "Read from Disk")
 
         self.setCentralWidget(tabs)
