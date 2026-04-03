@@ -185,6 +185,17 @@ ALL_GW_FORMATS = [
     "zx.watford.ss40",
 ]
 
+COMMON_OUTPUT_TYPES = [
+    "IMG",
+    "SCP",
+    "DSK",
+    "ADF",
+    "IPF",
+    "HFE",
+]
+
+ALL_OUTPUT_TYPES = sorted(suffix[1:].upper() for suffix in SUPPORTED_IMAGE_SUFFIXES)
+
 LOAD_MORE_FORMATS_TEXT = "Load more..."
 
 
@@ -810,6 +821,54 @@ class CreateImagesTab(QWidget):
         if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
             self._settings.setValue("create/selected_format", current_text)
 
+    def _populate_output_type_combo(self) -> None:
+        current_value = self.output_type_combo.currentText().strip()
+
+        self.output_type_combo.blockSignals(True)
+        self.output_type_combo.clear()
+
+        self.output_type_combo.addItems(COMMON_OUTPUT_TYPES)
+
+        if self._all_output_types_loaded:
+            self.output_type_combo.insertSeparator(self.output_type_combo.count())
+            for ext in ALL_OUTPUT_TYPES:
+                if ext not in COMMON_OUTPUT_TYPES:
+                    self.output_type_combo.addItem(ext)
+        else:
+            self.output_type_combo.insertSeparator(self.output_type_combo.count())
+            self.output_type_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.output_type_combo.findText(current_value)
+            if index >= 0:
+                self.output_type_combo.setCurrentIndex(index)
+            else:
+                self.output_type_combo.setCurrentIndex(0)
+        else:
+            self.output_type_combo.setCurrentIndex(0)
+
+        self.output_type_combo.blockSignals(False)
+
+    def _on_output_type_changed(self, index: int) -> None:
+        if index < 0:
+            return
+
+        if self.output_type_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_value = self.output_type_combo.currentText().strip()
+        if previous_value == LOAD_MORE_FORMATS_TEXT and index > 0:
+            previous_value = self.output_type_combo.itemText(index - 1)
+
+        self._all_output_types_loaded = True
+        self._populate_output_type_combo()
+
+        restored_index = self.output_type_combo.findText(previous_value)
+        if restored_index >= 0:
+            self.output_type_combo.setCurrentIndex(restored_index)
+
+        QTimer.singleShot(0, self.output_type_combo.showPopup)
+
     def _save_settings(self) -> None:
         if self._loading_settings:
             return
@@ -883,6 +942,10 @@ class CreateImagesTab(QWidget):
         self.output_folder_input.setText(output_folder)
         self.extra_flags_input.setText(extra_flags)
 
+        if output_type not in COMMON_OUTPUT_TYPES and output_type in ALL_OUTPUT_TYPES:
+            self._all_output_types_loaded = True
+            self._populate_output_type_combo()
+
         output_type_index = self.output_type_combo.findText(output_type)
         if output_type_index >= 0:
             self.output_type_combo.setCurrentIndex(output_type_index)
@@ -922,7 +985,9 @@ class CreateImagesTab(QWidget):
         self.disk_count_input.valueChanged.connect(self._save_settings)
 
         self.output_type_combo = QComboBox()
-        self.output_type_combo.addItems(["IMG", "SCP"])
+        self._all_output_types_loaded = False
+        self._populate_output_type_combo()
+        self.output_type_combo.currentIndexChanged.connect(self._on_output_type_changed)
         self.output_type_combo.currentIndexChanged.connect(self._save_settings)
 
         self._all_formats_loaded = False
