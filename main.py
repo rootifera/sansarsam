@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
+
+
+def resource_path(relative: str) -> str:
+    """Works both in dev and when frozen by PyInstaller."""
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / relative)
+    return str(Path(__file__).parent / relative)
 
 
 def main() -> int:
@@ -18,13 +26,14 @@ def main() -> int:
 
     app = QApplication(sys.argv)
 
-    app.setWindowIcon(QIcon("assets/icon.png"))
+    icon = QIcon(resource_path("assets/icon.ico"))
+    app.setWindowIcon(icon)
 
     QCoreApplication.setOrganizationName("Sansarsam")
     QCoreApplication.setApplicationName("Sansarsam")
 
     window = MainWindow()
-    window.setWindowIcon(QIcon("assets/icon.png"))
+    window.setWindowIcon(icon)
     window.show()
     return app.exec()
 
