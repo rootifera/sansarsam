@@ -96,6 +96,24 @@ def build_read_command(
     return command
 
 
+def build_convert_command(
+    input_path: Path,
+    output_path: Path,
+    fmt: str,
+    no_clobber: bool,
+    extra_flags: str,
+    gw_executable: str = "gw",
+) -> list[str]:
+    command = [gw_executable, "convert"]
+    if fmt.strip():
+        command.extend(["--format", fmt.strip()])
+    if no_clobber:
+        command.append("--no-clobber")
+    command.extend(_split_extra_flags(extra_flags))
+    command.extend([str(input_path), str(output_path)])
+    return command
+
+
 def run_command(
     command: list[str],
     log_callback: LogCallback,
@@ -115,6 +133,14 @@ def run_command(
         message = f"[error] Command not found: {command[0]}"
         log_callback(message)
         return CommandResult(command=command, return_code=127, output_lines=[message])
+    except PermissionError as exc:
+        message = f"[error] Permission denied while starting {command[0]}: {exc}"
+        log_callback(message)
+        return CommandResult(command=command, return_code=126, output_lines=[message])
+    except OSError as exc:
+        message = f"[error] Could not start {command[0]}: {exc}"
+        log_callback(message)
+        return CommandResult(command=command, return_code=126, output_lines=[message])
 
     if on_process_started is not None:
         on_process_started(process)

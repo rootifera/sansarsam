@@ -30,8 +30,10 @@ from PySide6.QtCore import QObject, QEventLoop, QThread, Signal
 import subprocess
 
 from services.greaseweazle import (
+    build_convert_command,
     build_read_command,
     build_write_command,
+    CommandResult,
     run_command,
     detect_gw_executable,
 )
@@ -204,6 +206,102 @@ class DiskAction:
     retry: bool = False
     skip: bool = False
     abort: bool = False
+
+
+@dataclass
+class CommandIssue:
+    message: str
+    detail: str
+
+
+CLI_FAILURE_PATTERNS = [
+    (re.compile(r"\berror\b", re.IGNORECASE), "gw reported an error."),
+    (re.compile(r"\bfail(?:ed|ure)?\b", re.IGNORECASE), "gw reported a failure."),
+    (re.compile(r"\bno\s+(?:flux|index|disk)\b", re.IGNORECASE), "No usable disk signal was detected."),
+    (re.compile(r"\b(?:read|write|verify)\b.*\b(?:error|fail|failed|mismatch)\b", re.IGNORECASE), "The disk operation did not verify cleanly."),
+    (re.compile(r"\b(?:crc|checksum)\b", re.IGNORECASE), "The disk data appears to have checksum/CRC errors."),
+    (re.compile(r"\b(?:bad|missing|damaged)\s+(?:sector|sectors|track|tracks)\b", re.IGNORECASE), "The disk appears to have bad or missing data."),
+    (re.compile(r"\b(?:not\s+recognized|unsupported|invalid)\b", re.IGNORECASE), "gw could not use the selected image, disk, or format."),
+    (re.compile(r"\bpermission denied\b", re.IGNORECASE), "The command could not access a required file or device."),
+]
+
+
+def _command_issue(result: CommandResult) -> CommandIssue | None:
+    if result.return_code != 0:
+        return CommandIssue(
+            f"gw exited with code {result.return_code}.",
+            _format_command_detail(result),
+        )
+
+    marker_line = _first_failure_line(result.output_lines)
+    if marker_line:
+        return CommandIssue(
+            marker_line[0],
+            _format_command_detail(result, marker_line[1]),
+        )
+
+    return None
+
+
+def _output_file_issue(output_path: Path, result: CommandResult) -> CommandIssue | None:
+    if not output_path.exists():
+        return CommandIssue(
+            "The output image was not created.",
+            _format_command_detail(result, f"Expected output: {output_path}"),
+        )
+    if output_path.stat().st_size == 0:
+        return CommandIssue(
+            "The output image was created but is empty.",
+            _format_command_detail(result, f"Expected output: {output_path}"),
+        )
+    return None
+
+
+def _first_failure_line(output_lines: list[str] | None) -> tuple[str, str] | None:
+    if not output_lines:
+        return None
+
+    for line in output_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.search(r"\b(?:0|no)\s+errors?\b", stripped, re.IGNORECASE):
+            continue
+        for pattern, message in CLI_FAILURE_PATTERNS:
+            if pattern.search(stripped):
+                return message, stripped
+
+    return None
+
+
+def _format_command_detail(result: CommandResult, extra: str | None = None) -> str:
+    lines = [f"Command: {' '.join(result.command)}"]
+    if extra:
+        lines.extend(["", extra])
+
+    output_tail = _recent_output(result.output_lines)
+    if output_tail:
+        lines.extend(["", "Recent output:", output_tail])
+
+    return "\n".join(lines)
+
+
+def _recent_output(output_lines: list[str] | None, limit: int = 12) -> str:
+    if not output_lines:
+        return "No output was captured."
+    useful_lines = [line for line in output_lines if line.strip()]
+    if not useful_lines:
+        return "No output was captured."
+    return "\n".join(useful_lines[-limit:])
+
+
+def _show_command_issue(parent: QWidget, title: str, issue: CommandIssue) -> None:
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle(title)
+    msg.setText(issue.message)
+    msg.setDetailedText(issue.detail)
+    msg.exec()
 
 
 class CommandWorker(QObject):
@@ -542,25 +640,15 @@ class WriteImagesTab(QWidget):
                     if result.cancelled:
                         self._append_log("Write workflow aborted by user during command execution.")
                         return
-                    if result.return_code == 0:
-                        if self._looks_like_cli_failure(result.output_lines):
-                            self._append_log(
-                                f"Disk {disk_index}: command output indicates a failure."
-                            )
-                            action = self._failure_action(disk_index)
-                            if action.retry:
-                                continue
-                            if action.skip:
-                                self._append_log(f"Disk {disk_index}: skipped after error.")
-                                break
-                            if action.abort:
-                                self._append_log("Write workflow aborted.")
-                                return
+                    issue = _command_issue(result)
+                    if issue is None:
                         self._append_log(f"Disk {disk_index}: completed.")
                         break
 
-                    action = self._failure_action(disk_index)
+                    self._append_log(f"Disk {disk_index}: {issue.message}")
+                    action = self._failure_action(disk_index, issue)
                     if action.retry:
+                        self._append_log(f"Disk {disk_index}: retrying.")
                         continue
                     if action.skip:
                         self._append_log(f"Disk {disk_index}: skipped after error.")
@@ -656,11 +744,13 @@ class WriteImagesTab(QWidget):
         if folder_path == self.folder_input.text().strip():
             self._scan_folder()
 
-    def _failure_action(self, disk_index: int) -> DiskAction:
+    def _failure_action(self, disk_index: int, issue: CommandIssue) -> DiskAction:
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Command Failed")
         msg.setText(f"Disk {disk_index} failed.")
+        msg.setInformativeText(issue.message)
+        msg.setDetailedText(issue.detail)
         retry_btn = msg.addButton("Retry", QMessageBox.AcceptRole)
         skip_btn = msg.addButton("Skip", QMessageBox.DestructiveRole)
         abort_btn = msg.addButton("Abort", QMessageBox.RejectRole)
@@ -719,13 +809,6 @@ class WriteImagesTab(QWidget):
         thread.wait()
 
         return result_holder["result"]
-
-    def _looks_like_cli_failure(self, output_lines: list[str] | None) -> bool:
-        if not output_lines:
-            return False
-        error_markers = ("error", "failed", "no flux", "no index", "no disk")
-        lowered = " ".join(output_lines).lower()
-        return any(marker in lowered for marker in error_markers)
 
     def _move_selected_up(self) -> None:
         current = self.file_list.currentRow()
@@ -1102,38 +1185,15 @@ class CreateImagesTab(QWidget):
                     if result.cancelled:
                         self._append_log("Create workflow aborted by user during command execution.")
                         return
-                    if result.return_code == 0:
-                        if self._looks_like_cli_failure(result.output_lines):
-                            self._append_log(
-                                f"Disk {disk_index}: command output indicates a failure."
-                            )
-                            action = self._failure_action(disk_index)
-                            if action.retry:
-                                continue
-                            if action.skip:
-                                self._append_log(f"Disk {disk_index}: skipped after error.")
-                                break
-                            if action.abort:
-                                self._append_log("Create workflow aborted.")
-                                return
-                        if not output_file.exists() or output_file.stat().st_size == 0:
-                            self._append_log(
-                                f"Disk {disk_index}: output image was not created correctly."
-                            )
-                            action = self._failure_action(disk_index)
-                            if action.retry:
-                                continue
-                            if action.skip:
-                                self._append_log(f"Disk {disk_index}: skipped after error.")
-                                break
-                            if action.abort:
-                                self._append_log("Create workflow aborted.")
-                                return
+                    issue = _command_issue(result) or _output_file_issue(output_file, result)
+                    if issue is None:
                         self._append_log(f"Disk {disk_index}: image created at {output_file}.")
                         break
 
-                    action = self._failure_action(disk_index)
+                    self._append_log(f"Disk {disk_index}: {issue.message}")
+                    action = self._failure_action(disk_index, issue)
                     if action.retry:
+                        self._append_log(f"Disk {disk_index}: retrying.")
                         continue
                     if action.skip:
                         self._append_log(f"Disk {disk_index}: skipped after error.")
@@ -1182,18 +1242,13 @@ class CreateImagesTab(QWidget):
 
         return result_holder["result"]
 
-    def _looks_like_cli_failure(self, output_lines: list[str] | None) -> bool:
-        if not output_lines:
-            return False
-        error_markers = ("error", "failed", "no flux", "no index", "no disk")
-        lowered = " ".join(output_lines).lower()
-        return any(marker in lowered for marker in error_markers)
-
-    def _failure_action(self, disk_index: int) -> DiskAction:
+    def _failure_action(self, disk_index: int, issue: CommandIssue) -> DiskAction:
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Command Failed")
         msg.setText(f"Disk {disk_index} failed.")
+        msg.setInformativeText(issue.message)
+        msg.setDetailedText(issue.detail)
         retry_btn = msg.addButton("Retry", QMessageBox.AcceptRole)
         skip_btn = msg.addButton("Skip", QMessageBox.DestructiveRole)
         abort_btn = msg.addButton("Abort", QMessageBox.RejectRole)
@@ -1278,6 +1333,462 @@ class CreateImagesTab(QWidget):
             return self.custom_format_input.text().strip()
         return self._selected_dropdown_format()
 
+
+class ConvertImagesTab(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._settings = QSettings()
+        self._loading_settings = False
+        self.setAcceptDrops(True)
+        self._build_ui()
+        self._load_settings()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        input_row = QHBoxLayout()
+        self.input_file_input = QLineEdit()
+        self.input_file_input.setReadOnly(True)
+        self.input_file_input.textChanged.connect(self._on_input_file_changed)
+        select_input_btn = QPushButton("Select Image")
+        select_input_btn.clicked.connect(self._select_input_file)
+        input_row.addWidget(QLabel("Input Image:"))
+        input_row.addWidget(self.input_file_input, 1)
+        input_row.addWidget(select_input_btn)
+        root.addLayout(input_row)
+
+        output_row = QHBoxLayout()
+        self.output_folder_input = QLineEdit()
+        self.output_folder_input.setReadOnly(True)
+        self.output_folder_input.textChanged.connect(self._save_settings)
+        select_output_btn = QPushButton("Select Output Folder")
+        select_output_btn.clicked.connect(self._select_output_folder)
+        output_row.addWidget(QLabel("Output Folder:"))
+        output_row.addWidget(self.output_folder_input, 1)
+        output_row.addWidget(select_output_btn)
+        root.addLayout(output_row)
+
+        details_group = QGroupBox("Conversion Details")
+        details_layout = QGridLayout(details_group)
+
+        self.output_name_input = QLineEdit()
+        self.output_name_input.textChanged.connect(self._save_settings)
+
+        self.output_type_combo = QComboBox()
+        self._all_output_types_loaded = False
+        self._populate_output_type_combo()
+        img_index = self.output_type_combo.findText("IMG")
+        if img_index >= 0:
+            self.output_type_combo.setCurrentIndex(img_index)
+        self.output_type_combo.currentIndexChanged.connect(self._on_output_type_changed)
+        self.output_type_combo.currentIndexChanged.connect(self._on_output_type_for_name_changed)
+        self.output_type_combo.currentIndexChanged.connect(self._save_settings)
+
+        self._all_formats_loaded = False
+        self.format_combo = QComboBox()
+        self.custom_format_checkbox = QCheckBox("Use custom format")
+        self.custom_format_input = QLineEdit()
+        self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
+        self.custom_format_input.setEnabled(False)
+        self.custom_format_input.textChanged.connect(self._save_settings)
+
+        self._populate_format_combo()
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.format_combo.currentIndexChanged.connect(self._save_settings)
+        self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
+        self.custom_format_checkbox.toggled.connect(self._save_settings)
+
+        self.no_clobber_checkbox = QCheckBox("Do not overwrite existing output")
+        self.no_clobber_checkbox.setChecked(True)
+        self.no_clobber_checkbox.toggled.connect(self._save_settings)
+
+        self.extra_flags_input = QLineEdit()
+        self.extra_flags_input.textChanged.connect(self._save_settings)
+
+        details_layout.addWidget(QLabel("Output filename:"), 0, 0)
+        details_layout.addWidget(self.output_name_input, 0, 1)
+        details_layout.addWidget(QLabel("Output type:"), 1, 0)
+        details_layout.addWidget(self.output_type_combo, 1, 1)
+        details_layout.addWidget(QLabel("Disk format:"), 2, 0)
+        details_layout.addWidget(self.format_combo, 2, 1)
+        details_layout.addWidget(self.custom_format_checkbox, 3, 1)
+        details_layout.addWidget(QLabel("Custom format string:"), 4, 0)
+        details_layout.addWidget(self.custom_format_input, 4, 1)
+        details_layout.addWidget(self.no_clobber_checkbox, 5, 1)
+        details_layout.addWidget(QLabel("Extra flags:"), 6, 0)
+        details_layout.addWidget(self.extra_flags_input, 6, 1)
+        root.addWidget(details_group)
+
+        self.start_btn = QPushButton("Start Conversion")
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setStyleSheet("""
+        QPushButton {
+            background-color: rgb(58, 110, 165);
+            color: white;
+            font-weight: bold;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid rgb(40, 80, 120);
+        }
+        QPushButton:hover {
+            background-color: rgb(70, 125, 185);
+        }
+        QPushButton:pressed {
+            background-color: rgb(40, 90, 140);
+        }
+        QPushButton:disabled {
+            background-color: rgb(140, 140, 140);
+            color: rgb(220, 220, 220);
+        }
+        """)
+        self.start_btn.clicked.connect(self._start_convert)
+        root.addWidget(self.start_btn)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        root.addWidget(QLabel("Log:"))
+        root.addWidget(self.log, 1)
+
+    def _load_settings(self) -> None:
+        self._loading_settings = True
+
+        input_file = self._settings.value("convert/input_file", "", type=str)
+        output_folder = self._settings.value("convert/output_folder", "", type=str)
+        output_name = self._settings.value("convert/output_name", "", type=str)
+        output_type = self._settings.value("convert/output_type", "IMG", type=str)
+        no_clobber = self._settings.value("convert/no_clobber", True, type=bool)
+        extra_flags = self._settings.value("convert/extra_flags", "", type=str)
+        custom_enabled = self._settings.value("convert/custom_format_enabled", False, type=bool)
+        custom_text = self._settings.value("convert/custom_format_text", "", type=str)
+        selected_format = self._settings.value("convert/selected_format", "ibm.1440", type=str)
+
+        self.input_file_input.setText(input_file)
+        self.output_folder_input.setText(output_folder)
+        self.output_name_input.setText(output_name)
+        self.no_clobber_checkbox.setChecked(no_clobber)
+        self.extra_flags_input.setText(extra_flags)
+
+        if output_type not in COMMON_OUTPUT_TYPES and output_type in ALL_OUTPUT_TYPES:
+            self._all_output_types_loaded = True
+            self._populate_output_type_combo()
+
+        output_type_index = self.output_type_combo.findText(output_type)
+        if output_type_index >= 0:
+            self.output_type_combo.setCurrentIndex(output_type_index)
+
+        format_index = self.format_combo.findText(selected_format)
+        if format_index >= 0:
+            self.format_combo.setCurrentIndex(format_index)
+
+        self.custom_format_checkbox.setChecked(custom_enabled)
+        self.custom_format_input.setText(custom_text)
+        self._on_custom_format_toggled(custom_enabled)
+
+        self._loading_settings = False
+
+    def _save_settings(self) -> None:
+        if self._loading_settings:
+            return
+
+        self._settings.setValue("convert/input_file", self.input_file_input.text().strip())
+        self._settings.setValue("convert/output_folder", self.output_folder_input.text().strip())
+        self._settings.setValue("convert/output_name", self.output_name_input.text().strip())
+        self._settings.setValue("convert/output_type", self.output_type_combo.currentText())
+        self._settings.setValue("convert/no_clobber", self.no_clobber_checkbox.isChecked())
+        self._settings.setValue("convert/extra_flags", self.extra_flags_input.text())
+
+        self._settings.setValue(
+            "convert/custom_format_enabled",
+            self.custom_format_checkbox.isChecked(),
+        )
+        self._settings.setValue(
+            "convert/custom_format_text",
+            self.custom_format_input.text(),
+        )
+
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            self._settings.setValue("convert/selected_format", current_text)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+
+        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        if not paths:
+            return
+
+        for path in paths:
+            if path.is_file():
+                self._set_input_file(path)
+                return
+
+        for path in paths:
+            if path.is_dir():
+                self.output_folder_input.setText(str(path))
+                self._save_settings()
+                return
+
+    def _select_input_file(self) -> None:
+        suffix_filter = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_IMAGE_SUFFIXES))
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select image to convert",
+            "",
+            f"Disk images ({suffix_filter});;All files (*)",
+        )
+        if path:
+            self._set_input_file(Path(path))
+
+    def _set_input_file(self, path: Path) -> None:
+        self.input_file_input.setText(str(path))
+        if not self.output_folder_input.text().strip():
+            self.output_folder_input.setText(str(path.parent))
+        if not self.output_name_input.text().strip():
+            self.output_name_input.setText(self._default_output_name(path))
+        self._save_settings()
+
+    def _select_output_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder")
+        if folder:
+            self.output_folder_input.setText(folder)
+            self._save_settings()
+
+    def _on_input_file_changed(self) -> None:
+        if self._loading_settings:
+            return
+        self._save_settings()
+
+    def _on_output_type_for_name_changed(self) -> None:
+        if self._loading_settings:
+            return
+        current_name = self.output_name_input.text().strip()
+        if not current_name:
+            input_path = self._input_path()
+            if input_path is not None:
+                self.output_name_input.setText(self._default_output_name(input_path))
+            return
+
+        suffix = f".{self._selected_output_type().lower()}"
+        current_path = Path(current_name)
+        if current_path.suffix:
+            self.output_name_input.setText(f"{current_path.stem}{suffix}")
+
+    def _default_output_name(self, input_path: Path) -> str:
+        return f"{input_path.stem}.{self._selected_output_type().lower()}"
+
+    def _selected_output_type(self) -> str:
+        current_text = self.output_type_combo.currentText().strip()
+        if current_text == LOAD_MORE_FORMATS_TEXT:
+            return "IMG"
+        return current_text or "IMG"
+
+    def _input_path(self) -> Path | None:
+        input_text = self.input_file_input.text().strip()
+        return Path(input_text) if input_text else None
+
+    def _start_convert(self) -> None:
+        input_path = self._input_path()
+        output_folder_text = self.output_folder_input.text().strip()
+        output_name = self.output_name_input.text().strip()
+
+        if input_path is None:
+            QMessageBox.warning(self, "Missing Image", "Please select an input image.")
+            return
+        if not input_path.exists() or not input_path.is_file():
+            QMessageBox.warning(self, "Invalid Image", "Selected input image is not valid.")
+            return
+        if input_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
+            QMessageBox.warning(self, "Unsupported Image", "Selected input image type is not supported.")
+            return
+        if not output_folder_text:
+            QMessageBox.warning(self, "Missing Folder", "Please select an output folder.")
+            return
+        if not output_name:
+            QMessageBox.warning(self, "Missing Filename", "Please provide an output filename.")
+            return
+
+        output_dir = Path(output_folder_text)
+        if not output_dir.exists() or not output_dir.is_dir():
+            QMessageBox.warning(self, "Invalid Folder", "Output folder does not exist.")
+            return
+
+        output_path = output_dir / output_name
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(f".{self._selected_output_type().lower()}")
+
+        command = build_convert_command(
+            input_path=input_path,
+            output_path=output_path,
+            fmt=self._selected_format(),
+            no_clobber=self.no_clobber_checkbox.isChecked(),
+            extra_flags=self.extra_flags_input.text(),
+            gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
+        )
+
+        self._set_busy(True)
+        try:
+            result = self._run_command_with_progress(command)
+            if result.cancelled:
+                self._append_log("Convert workflow aborted by user during command execution.")
+                return
+            issue = _command_issue(result) or _output_file_issue(output_path, result)
+            if issue is not None:
+                self._append_log(f"Conversion failed: {issue.message}")
+                _show_command_issue(self, "Conversion Failed", issue)
+                return
+            self._append_log(f"Conversion completed at {output_path}.")
+        finally:
+            self._set_busy(False)
+
+    def _populate_output_type_combo(self) -> None:
+        current_value = self.output_type_combo.currentText().strip()
+
+        self.output_type_combo.blockSignals(True)
+        self.output_type_combo.clear()
+        self.output_type_combo.addItems(COMMON_OUTPUT_TYPES)
+
+        if self._all_output_types_loaded:
+            self.output_type_combo.insertSeparator(self.output_type_combo.count())
+            for ext in ALL_OUTPUT_TYPES:
+                if ext not in COMMON_OUTPUT_TYPES:
+                    self.output_type_combo.addItem(ext)
+        else:
+            self.output_type_combo.insertSeparator(self.output_type_combo.count())
+            self.output_type_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.output_type_combo.findText(current_value)
+            self.output_type_combo.setCurrentIndex(index if index >= 0 else 0)
+        else:
+            img_index = self.output_type_combo.findText("IMG")
+            self.output_type_combo.setCurrentIndex(img_index if img_index >= 0 else 0)
+
+        self.output_type_combo.blockSignals(False)
+
+    def _on_output_type_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self.output_type_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_value = "IMG"
+        if index > 0:
+            previous_value = self.output_type_combo.itemText(index - 1)
+
+        self._all_output_types_loaded = True
+        self._populate_output_type_combo()
+        restored_index = self.output_type_combo.findText(previous_value)
+        if restored_index >= 0:
+            self.output_type_combo.setCurrentIndex(restored_index)
+
+        QTimer.singleShot(0, self.output_type_combo.showPopup)
+
+    def _populate_format_combo(self) -> None:
+        current_value = self.format_combo.currentText().strip()
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self.format_combo.addItems(COMMON_GW_FORMATS)
+        if self._all_formats_loaded:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            for fmt in ALL_GW_FORMATS:
+                if fmt not in COMMON_GW_FORMATS:
+                    self.format_combo.addItem(fmt)
+        else:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            self.format_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.format_combo.findText(current_value)
+            if index >= 0:
+                self.format_combo.setCurrentIndex(index)
+            else:
+                default_index = self.format_combo.findText("ibm.1440")
+                self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        else:
+            default_index = self.format_combo.findText("ibm.1440")
+            self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        self.format_combo.blockSignals(False)
+
+    def _on_format_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self.format_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_format = "ibm.1440"
+        if index > 0:
+            previous_format = self.format_combo.itemText(index - 1)
+
+        self._all_formats_loaded = True
+        self._populate_format_combo()
+        restored_index = self.format_combo.findText(previous_format)
+        if restored_index >= 0:
+            self.format_combo.setCurrentIndex(restored_index)
+
+        QTimer.singleShot(0, self.format_combo.showPopup)
+
+    def _on_custom_format_toggled(self, checked: bool) -> None:
+        self.format_combo.setEnabled(not checked)
+        self.custom_format_input.setEnabled(checked)
+        if checked and not self.custom_format_input.text().strip():
+            self.custom_format_input.setText(self._selected_dropdown_format())
+
+    def _selected_dropdown_format(self) -> str:
+        current_text = self.format_combo.currentText().strip()
+        if current_text == LOAD_MORE_FORMATS_TEXT:
+            return "ibm.1440"
+        return current_text
+
+    def _selected_format(self) -> str:
+        if self.custom_format_checkbox.isChecked():
+            return self.custom_format_input.text().strip()
+        return self._selected_dropdown_format()
+
+    def _append_log(self, text: str) -> None:
+        self.log.appendPlainText(text)
+        self.log.moveCursor(QTextCursor.End)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.start_btn.setEnabled(not busy)
+
+    def _run_command_with_progress(self, command: list[str]):
+        progress = QProgressDialog("Converting image...", "Abort", 0, 0, self)
+        progress.setWindowTitle("Running")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        thread = QThread(self)
+        worker = CommandWorker(command)
+        worker.moveToThread(thread)
+
+        result_holder: dict[str, object] = {}
+        loop = QEventLoop(self)
+
+        worker.output.connect(self._append_log)
+        worker.finished.connect(lambda result: result_holder.setdefault("result", result))
+        worker.finished.connect(loop.quit)
+        thread.started.connect(worker.run)
+        progress.canceled.connect(
+            lambda: (self._append_log("[abort requested]"), worker.cancel())
+        )
+
+        thread.start()
+        progress.show()
+        loop.exec()
+
+        progress.hide()
+        thread.quit()
+        thread.wait()
+
+        return result_holder["result"]
 
 def _disk_sort_key(path: Path) -> tuple[int, str]:
     name = path.stem.lower()

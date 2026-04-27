@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.greaseweazle import detect_gw_executable
-from ui.tabs import CreateImagesTab, WriteImagesTab
+from ui.tabs import ConvertImagesTab, CreateImagesTab, WriteImagesTab
 
 
 class MainWindow(QMainWindow):
@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(WriteImagesTab(), "Write to Disk")
         tabs.addTab(CreateImagesTab(), "Read from Disk")
+        tabs.addTab(ConvertImagesTab(), "Convert Images")
 
         layout.addWidget(tabs)
 
