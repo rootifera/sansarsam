@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,10 @@ class CommandResult:
     return_code: int
     cancelled: bool = False
     output_lines: list[str] | None = None
+
+
+class InvalidExtraFlagsError(ValueError):
+    pass
 
 
 def detect_gw_executable() -> str:
@@ -114,12 +119,42 @@ def build_convert_command(
     return command
 
 
+def build_erase_command(
+    fmt: str,
+    extra_flags: str,
+    gw_executable: str = "gw",
+) -> list[str]:
+    command = [gw_executable, "erase"]
+    if fmt.strip():
+        command.extend(["--format", fmt.strip()])
+    command.extend(_split_extra_flags(extra_flags))
+    return command
+
+
+def build_clean_command(
+    extra_flags: str,
+    gw_executable: str = "gw",
+) -> list[str]:
+    command = [gw_executable, "clean"]
+    command.extend(_split_extra_flags(extra_flags))
+    return command
+
+
+def build_update_command(
+    extra_flags: str,
+    gw_executable: str = "gw",
+) -> list[str]:
+    command = [gw_executable, "update"]
+    command.extend(_split_extra_flags(extra_flags))
+    return command
+
+
 def run_command(
     command: list[str],
     log_callback: LogCallback,
     on_process_started: Callable[[subprocess.Popen[str]], None] | None = None,
 ) -> CommandResult:
-    log_callback(f"$ {' '.join(command)}")
+    log_callback(f"$ {shlex.join(command)}")
 
     try:
         process = subprocess.Popen(
@@ -158,4 +193,7 @@ def run_command(
 
 
 def _split_extra_flags(extra_flags: str) -> list[str]:
-    return [flag for flag in extra_flags.split() if flag]
+    try:
+        return shlex.split(extra_flags)
+    except ValueError as exc:
+        raise InvalidExtraFlagsError(f"Could not parse extra flags: {exc}") from exc

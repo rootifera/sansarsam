@@ -8,6 +8,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
+from version import APP_NAME, APP_VERSION
 
 
 def resource_path(relative: str) -> str:
@@ -29,8 +30,9 @@ def main() -> int:
     icon = QIcon(resource_path("assets/icon.ico"))
     app.setWindowIcon(icon)
 
-    QCoreApplication.setOrganizationName("Sansarsam")
-    QCoreApplication.setApplicationName("Sansarsam")
+    QCoreApplication.setOrganizationName(APP_NAME)
+    QCoreApplication.setApplicationName(APP_NAME)
+    QCoreApplication.setApplicationVersion(APP_VERSION)
 
     window = MainWindow()
     window.setWindowIcon(icon)

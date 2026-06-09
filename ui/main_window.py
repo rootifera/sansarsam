@@ -14,13 +14,14 @@ from PySide6.QtWidgets import (
 )
 
 from services.greaseweazle import detect_gw_executable
-from ui.tabs import ConvertImagesTab, CreateImagesTab, WriteImagesTab
+from ui.tabs import ConvertImagesTab, CreateImagesTab, ToolsTab, WriteImagesTab
+from version import APP_NAME, APP_VERSION
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Sansarsam")
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(900, 700)
 
         self._settings = QSettings()
@@ -48,10 +49,12 @@ class MainWindow(QMainWindow):
         tabs.addTab(WriteImagesTab(), "Write to Disk")
         tabs.addTab(CreateImagesTab(), "Read from Disk")
         tabs.addTab(ConvertImagesTab(), "Convert Images")
+        tabs.addTab(ToolsTab(), "Tools")
 
         layout.addWidget(tabs)
 
         self.setCentralWidget(container)
+        self.statusBar().showMessage(f"{APP_NAME} {APP_VERSION}")
 
     def _save_gw_path(self) -> None:
         self._settings.setValue("app/gw_path", self.gw_input.text().strip())

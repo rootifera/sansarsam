@@ -30,10 +30,14 @@ from PySide6.QtCore import QObject, QEventLoop, QThread, Signal
 import subprocess
 
 from services.greaseweazle import (
+    build_clean_command,
     build_convert_command,
+    build_erase_command,
     build_read_command,
+    build_update_command,
     build_write_command,
     CommandResult,
+    InvalidExtraFlagsError,
     run_command,
     detect_gw_executable,
 )
@@ -629,13 +633,17 @@ class WriteImagesTab(QWidget):
                     return
 
                 while True:
-                    command = build_write_command(
-                        image_path=image_path,
-                        fmt=self._selected_format(),
-                        verify=self.verify_checkbox.isChecked(),
-                        extra_flags=self.extra_flags_input.text(),
-                        gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
-                    )
+                    try:
+                        command = build_write_command(
+                            image_path=image_path,
+                            fmt=self._selected_format(),
+                            verify=self.verify_checkbox.isChecked(),
+                            extra_flags=self.extra_flags_input.text(),
+                            gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
+                        )
+                    except InvalidExtraFlagsError as exc:
+                        QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+                        return
                     result = self._run_command_with_progress(command)
                     if result.cancelled:
                         self._append_log("Write workflow aborted by user during command execution.")
@@ -1174,13 +1182,17 @@ class CreateImagesTab(QWidget):
                 output_file = output_dir / f"{label} Disk {disk_index}.{extension}"
 
                 while True:
-                    command = build_read_command(
-                        output_path=output_file,
-                        output_type=output_type,
-                        fmt=self._selected_format(),
-                        extra_flags=self.extra_flags_input.text(),
-                        gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
-                    )
+                    try:
+                        command = build_read_command(
+                            output_path=output_file,
+                            output_type=output_type,
+                            fmt=self._selected_format(),
+                            extra_flags=self.extra_flags_input.text(),
+                            gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
+                        )
+                    except InvalidExtraFlagsError as exc:
+                        QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+                        return
                     result = self._run_command_with_progress(command)
                     if result.cancelled:
                         self._append_log("Create workflow aborted by user during command execution.")
@@ -1624,14 +1636,18 @@ class ConvertImagesTab(QWidget):
         if not output_path.suffix:
             output_path = output_path.with_suffix(f".{self._selected_output_type().lower()}")
 
-        command = build_convert_command(
-            input_path=input_path,
-            output_path=output_path,
-            fmt=self._selected_format(),
-            no_clobber=self.no_clobber_checkbox.isChecked(),
-            extra_flags=self.extra_flags_input.text(),
-            gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
-        )
+        try:
+            command = build_convert_command(
+                input_path=input_path,
+                output_path=output_path,
+                fmt=self._selected_format(),
+                no_clobber=self.no_clobber_checkbox.isChecked(),
+                extra_flags=self.extra_flags_input.text(),
+                gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
+            )
+        except InvalidExtraFlagsError as exc:
+            QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+            return
 
         self._set_busy(True)
         try:
@@ -1789,6 +1805,304 @@ class ConvertImagesTab(QWidget):
         thread.wait()
 
         return result_holder["result"]
+
+
+class ToolsTab(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._settings = QSettings()
+        self._loading_settings = False
+        self._build_ui()
+        self._load_settings()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        erase_group = QGroupBox("Erase Disk")
+        erase_layout = QFormLayout(erase_group)
+
+        self._all_formats_loaded = False
+        self.format_combo = QComboBox()
+        self.custom_format_checkbox = QCheckBox("Use custom format")
+        self.custom_format_input = QLineEdit()
+        self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
+        self.custom_format_input.setEnabled(False)
+
+        self._populate_format_combo()
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.format_combo.currentIndexChanged.connect(self._save_settings)
+        self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
+        self.custom_format_checkbox.toggled.connect(self._save_settings)
+        self.custom_format_input.textChanged.connect(self._save_settings)
+
+        self.erase_extra_flags_input = QLineEdit()
+        self.erase_extra_flags_input.textChanged.connect(self._save_settings)
+        self.erase_btn = QPushButton("Erase Disk")
+        self.erase_btn.clicked.connect(self._start_erase)
+
+        erase_layout.addRow("Disk format:", self.format_combo)
+        erase_layout.addRow("Custom:", self.custom_format_checkbox)
+        erase_layout.addRow("Custom format string:", self.custom_format_input)
+        erase_layout.addRow("Extra flags:", self.erase_extra_flags_input)
+        erase_layout.addRow(self.erase_btn)
+        root.addWidget(erase_group)
+
+        clean_group = QGroupBox("Clean Drive")
+        clean_layout = QFormLayout(clean_group)
+        self.clean_extra_flags_input = QLineEdit()
+        self.clean_extra_flags_input.textChanged.connect(self._save_settings)
+        self.clean_btn = QPushButton("Clean Drive")
+        self.clean_btn.clicked.connect(self._start_clean)
+        clean_layout.addRow("Extra flags:", self.clean_extra_flags_input)
+        clean_layout.addRow(self.clean_btn)
+        root.addWidget(clean_group)
+
+        update_group = QGroupBox("Update Firmware")
+        update_layout = QFormLayout(update_group)
+        self.update_extra_flags_input = QLineEdit()
+        self.update_extra_flags_input.setPlaceholderText("optional version, firmware path, or gw update flags")
+        self.update_extra_flags_input.textChanged.connect(self._save_settings)
+        self.update_btn = QPushButton("Update Firmware")
+        self.update_btn.clicked.connect(self._start_update)
+        update_layout.addRow("Extra flags:", self.update_extra_flags_input)
+        update_layout.addRow(self.update_btn)
+        root.addWidget(update_group)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        root.addWidget(QLabel("Log:"))
+        root.addWidget(self.log, 1)
+
+    def _load_settings(self) -> None:
+        self._loading_settings = True
+
+        selected_format = self._settings.value("tools/selected_format", "ibm.1440", type=str)
+        custom_enabled = self._settings.value("tools/custom_format_enabled", False, type=bool)
+        custom_text = self._settings.value("tools/custom_format_text", "", type=str)
+
+        format_index = self.format_combo.findText(selected_format)
+        if format_index >= 0:
+            self.format_combo.setCurrentIndex(format_index)
+
+        self.custom_format_checkbox.setChecked(custom_enabled)
+        self.custom_format_input.setText(custom_text)
+        self._on_custom_format_toggled(custom_enabled)
+
+        self.erase_extra_flags_input.setText(
+            self._settings.value("tools/erase_extra_flags", "", type=str)
+        )
+        self.clean_extra_flags_input.setText(
+            self._settings.value("tools/clean_extra_flags", "", type=str)
+        )
+        self.update_extra_flags_input.setText(
+            self._settings.value("tools/update_extra_flags", "", type=str)
+        )
+
+        self._loading_settings = False
+
+    def _save_settings(self) -> None:
+        if self._loading_settings:
+            return
+
+        self._settings.setValue("tools/erase_extra_flags", self.erase_extra_flags_input.text())
+        self._settings.setValue("tools/clean_extra_flags", self.clean_extra_flags_input.text())
+        self._settings.setValue("tools/update_extra_flags", self.update_extra_flags_input.text())
+        self._settings.setValue(
+            "tools/custom_format_enabled",
+            self.custom_format_checkbox.isChecked(),
+        )
+        self._settings.setValue("tools/custom_format_text", self.custom_format_input.text())
+
+        current_text = self.format_combo.currentText().strip()
+        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
+            self._settings.setValue("tools/selected_format", current_text)
+
+    def _start_erase(self) -> None:
+        if not self._confirm(
+            "Erase Disk",
+            "This will erase the disk in the selected drive. Continue?",
+        ):
+            return
+
+        try:
+            command = build_erase_command(
+                fmt=self._selected_format(),
+                extra_flags=self.erase_extra_flags_input.text(),
+                gw_executable=self._gw_executable(),
+            )
+        except InvalidExtraFlagsError as exc:
+            QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+            return
+
+        self._run_tool_command(command, "Erasing disk...")
+
+    def _start_clean(self) -> None:
+        if not self._confirm(
+            "Clean Drive",
+            "Insert a cleaning disk before continuing.",
+        ):
+            return
+
+        try:
+            command = build_clean_command(
+                extra_flags=self.clean_extra_flags_input.text(),
+                gw_executable=self._gw_executable(),
+            )
+        except InvalidExtraFlagsError as exc:
+            QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+            return
+
+        self._run_tool_command(command, "Cleaning drive...")
+
+    def _start_update(self) -> None:
+        if not self._confirm(
+            "Update Firmware",
+            "This will update the Greaseweazle device firmware. Continue?",
+        ):
+            return
+
+        try:
+            command = build_update_command(
+                extra_flags=self.update_extra_flags_input.text(),
+                gw_executable=self._gw_executable(),
+            )
+        except InvalidExtraFlagsError as exc:
+            QMessageBox.warning(self, "Invalid Extra Flags", str(exc))
+            return
+
+        self._run_tool_command(command, "Updating firmware...")
+
+    def _run_tool_command(self, command: list[str], progress_text: str) -> None:
+        self._set_busy(True)
+        try:
+            result = self._run_command_with_progress(command, progress_text)
+            if result.cancelled:
+                self._append_log("Tool command aborted by user during command execution.")
+                return
+            issue = _command_issue(result)
+            if issue is not None:
+                self._append_log(f"Tool command failed: {issue.message}")
+                _show_command_issue(self, "Tool Command Failed", issue)
+                return
+            self._append_log("Tool command completed.")
+        finally:
+            self._set_busy(False)
+
+    def _populate_format_combo(self) -> None:
+        current_value = self.format_combo.currentText().strip()
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self.format_combo.addItems(COMMON_GW_FORMATS)
+        if self._all_formats_loaded:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            for fmt in ALL_GW_FORMATS:
+                if fmt not in COMMON_GW_FORMATS:
+                    self.format_combo.addItem(fmt)
+        else:
+            self.format_combo.insertSeparator(self.format_combo.count())
+            self.format_combo.addItem(LOAD_MORE_FORMATS_TEXT)
+
+        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
+            index = self.format_combo.findText(current_value)
+            if index >= 0:
+                self.format_combo.setCurrentIndex(index)
+            else:
+                default_index = self.format_combo.findText("ibm.1440")
+                self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        else:
+            default_index = self.format_combo.findText("ibm.1440")
+            self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        self.format_combo.blockSignals(False)
+
+    def _on_format_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self.format_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
+            return
+
+        previous_format = "ibm.1440"
+        if index > 0:
+            previous_format = self.format_combo.itemText(index - 1)
+
+        self._all_formats_loaded = True
+        self._populate_format_combo()
+        restored_index = self.format_combo.findText(previous_format)
+        if restored_index >= 0:
+            self.format_combo.setCurrentIndex(restored_index)
+
+        self._save_settings()
+        QTimer.singleShot(0, self.format_combo.showPopup)
+
+    def _on_custom_format_toggled(self, checked: bool) -> None:
+        self.format_combo.setEnabled(not checked)
+        self.custom_format_input.setEnabled(checked)
+        if checked and not self.custom_format_input.text().strip():
+            self.custom_format_input.setText(self._selected_dropdown_format())
+        self._save_settings()
+
+    def _selected_dropdown_format(self) -> str:
+        current_text = self.format_combo.currentText().strip()
+        if current_text == LOAD_MORE_FORMATS_TEXT:
+            return "ibm.1440"
+        return current_text
+
+    def _selected_format(self) -> str:
+        if self.custom_format_checkbox.isChecked():
+            return self.custom_format_input.text().strip()
+        return self._selected_dropdown_format()
+
+    def _gw_executable(self) -> str:
+        return self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw"
+
+    def _confirm(self, title: str, message: str) -> bool:
+        return QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _append_log(self, text: str) -> None:
+        self.log.appendPlainText(text)
+        self.log.moveCursor(QTextCursor.End)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.erase_btn.setEnabled(not busy)
+        self.clean_btn.setEnabled(not busy)
+        self.update_btn.setEnabled(not busy)
+
+    def _run_command_with_progress(self, command: list[str], progress_text: str):
+        progress = QProgressDialog(progress_text, "Abort", 0, 0, self)
+        progress.setWindowTitle("Running")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        thread = QThread(self)
+        worker = CommandWorker(command)
+        worker.moveToThread(thread)
+
+        result_holder: dict[str, object] = {}
+        loop = QEventLoop(self)
+
+        worker.output.connect(self._append_log)
+        worker.finished.connect(lambda result: result_holder.setdefault("result", result))
+        worker.finished.connect(loop.quit)
+        thread.started.connect(worker.run)
+        progress.canceled.connect(
+            lambda: (self._append_log("[abort requested]"), worker.cancel())
+        )
+
+        thread.start()
+        progress.show()
+        loop.exec()
+
+        progress.hide()
+        thread.quit()
+        thread.wait()
+
+        return result_holder["result"]
+
 
 def _disk_sort_key(path: Path) -> tuple[int, str]:
     name = path.stem.lower()
