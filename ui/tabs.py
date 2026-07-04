@@ -203,6 +203,7 @@ COMMON_OUTPUT_TYPES = [
 ALL_OUTPUT_TYPES = sorted(suffix[1:].upper() for suffix in SUPPORTED_IMAGE_SUFFIXES)
 
 LOAD_MORE_FORMATS_TEXT = "Load more..."
+KRYOFLUX_TRACK_RE = re.compile(r"^track(\d+)\.(\d+)\.raw$", re.IGNORECASE)
 
 
 @dataclass
@@ -210,6 +211,34 @@ class DiskAction:
     retry: bool = False
     skip: bool = False
     abort: bool = False
+
+
+@dataclass
+class WriteTarget:
+    display_name: str
+    image_path: Path
+    group_key: str
+    extra_flags: str = ""
+    skip_format: bool = False
+
+
+@dataclass
+class KryoFluxSet:
+    folder: Path
+    first_track: Path
+    cylinders: set[int]
+    heads: set[int]
+
+    @property
+    def tracks_flag(self) -> str:
+        heads = ",".join(str(head) for head in sorted(self.heads))
+        return f"--tracks=c={_format_number_set(self.cylinders)}:h={heads}"
+
+    @property
+    def display_name(self) -> str:
+        cylinder_count = len(self.cylinders)
+        head_text = ",".join(str(head) for head in sorted(self.heads))
+        return f"{self.folder.name} [KryoFlux RAW set: {cylinder_count} cyl, h={head_text}]"
 
 
 @dataclass
@@ -306,6 +335,68 @@ def _show_command_issue(parent: QWidget, title: str, issue: CommandIssue) -> Non
     msg.setText(issue.message)
     msg.setDetailedText(issue.detail)
     msg.exec()
+
+
+def _detect_kryoflux_set(folder: Path) -> KryoFluxSet | None:
+    tracks: list[tuple[int, int, Path]] = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return None
+
+    for path in entries:
+        if not path.is_file():
+            continue
+        match = KRYOFLUX_TRACK_RE.match(path.name)
+        if match is None:
+            continue
+        tracks.append((int(match.group(1)), int(match.group(2)), path))
+
+    if not tracks:
+        return None
+
+    tracks.sort(key=lambda track: (track[0], track[1], track[2].name.lower()))
+    cylinders = {cylinder for cylinder, _head, _path in tracks}
+    heads = {head for _cylinder, head, _path in tracks}
+    first_track = tracks[0][2]
+
+    return KryoFluxSet(
+        folder=folder,
+        first_track=first_track,
+        cylinders=cylinders,
+        heads=heads,
+    )
+
+
+def _format_number_set(values: set[int]) -> str:
+    sorted_values = sorted(values)
+    if not sorted_values:
+        return ""
+
+    ranges: list[str] = []
+    start = sorted_values[0]
+    previous = sorted_values[0]
+
+    for value in sorted_values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(_format_range(start, previous))
+        start = value
+        previous = value
+
+    ranges.append(_format_range(start, previous))
+    return ",".join(ranges)
+
+
+def _format_range(start: int, end: int) -> str:
+    if start == end:
+        return str(start)
+    return f"{start}-{end}"
+
+
+def _merge_extra_flags(*flag_groups: str) -> str:
+    return " ".join(flags.strip() for flags in flag_groups if flags.strip())
 
 
 class CommandWorker(QObject):
@@ -583,51 +674,98 @@ class WriteImagesTab(QWidget):
             QMessageBox.warning(self, "Invalid Folder", "Selected folder is not valid.")
             return
 
-        found = [
-            path
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
-        ]
+        root_kryoflux_set = _detect_kryoflux_set(folder)
+        found_targets: list[WriteTarget] = []
+
+        if root_kryoflux_set is not None:
+            found_targets.append(
+                WriteTarget(
+                    display_name=root_kryoflux_set.display_name,
+                    image_path=root_kryoflux_set.first_track,
+                    group_key=str(root_kryoflux_set.folder),
+                    extra_flags=_merge_extra_flags(
+                        "--drive=a",
+                        "--retries=3",
+                        "--erase-empty",
+                        root_kryoflux_set.tracks_flag,
+                    ),
+                    skip_format=True,
+                )
+            )
+        else:
+            for path in folder.iterdir():
+                if path.is_dir():
+                    kryoflux_set = _detect_kryoflux_set(path)
+                    if kryoflux_set is None:
+                        continue
+                    found_targets.append(
+                        WriteTarget(
+                            display_name=kryoflux_set.display_name,
+                            image_path=kryoflux_set.first_track,
+                            group_key=str(kryoflux_set.folder),
+                            extra_flags=_merge_extra_flags(
+                                "--drive=a",
+                                "--retries=3",
+                                "--erase-empty",
+                                kryoflux_set.tracks_flag,
+                            ),
+                            skip_format=True,
+                        )
+                    )
+                    continue
+                if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES:
+                    if KRYOFLUX_TRACK_RE.match(path.name):
+                        continue
+                    found_targets.append(
+                        WriteTarget(
+                            display_name=path.name,
+                            image_path=path,
+                            group_key=str(path),
+                        )
+                    )
+
         current_items: dict[str, Qt.CheckState] = {}
         current_order: list[str] = []
         for index in range(self.file_list.count()):
             item = self.file_list.item(index)
-            path_value = item.data(Qt.UserRole)
-            if path_value:
-                path_str = str(path_value)
-                current_items[path_str] = item.checkState()
-                current_order.append(path_str)
+            target = item.data(Qt.UserRole)
+            if isinstance(target, WriteTarget):
+                current_items[target.group_key] = item.checkState()
+                current_order.append(target.group_key)
 
-        found_by_path = {str(path): path for path in found}
-        merged_paths: list[str] = [path for path in current_order if path in found_by_path]
-        for new_path in sorted(found_by_path.values(), key=_disk_sort_key):
-            new_path_str = str(new_path)
-            if new_path_str not in current_items:
-                merged_paths.append(new_path_str)
+        found_by_key = {target.group_key: target for target in found_targets}
+        merged_keys: list[str] = [key for key in current_order if key in found_by_key]
+        for new_target in sorted(found_targets, key=_write_target_sort_key):
+            if new_target.group_key not in current_items:
+                merged_keys.append(new_target.group_key)
 
         self.file_list.clear()
-        for path_str in merged_paths:
-            file_path = Path(path_str)
-            item = QListWidgetItem(file_path.name)
-            item.setData(Qt.UserRole, path_str)
+        for key in merged_keys:
+            target = found_by_key[key]
+            item = QListWidgetItem(target.display_name)
+            item.setData(Qt.UserRole, target)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(current_items.get(path_str, Qt.Checked))
+            item.setCheckState(current_items.get(key, Qt.Checked))
             self.file_list.addItem(item)
 
-        self._append_log(f"Found {len(found_by_path)} supported image file(s).")
+        kryoflux_count = sum(1 for target in found_targets if target.skip_format)
+        normal_count = len(found_targets) - kryoflux_count
+        self._append_log(
+            f"Found {normal_count} supported image file(s) and {kryoflux_count} KryoFlux set(s)."
+        )
 
     def _start_write(self) -> None:
-        disk_files = self._collect_disk_files()
-        if not disk_files:
+        write_targets = self._collect_write_targets()
+        if not write_targets:
             QMessageBox.warning(self, "No Files", "No images loaded to write.")
             return
 
         self._set_busy(True)
         try:
-            for disk_index, image_path in enumerate(disk_files, start=1):
+            for disk_index, target in enumerate(write_targets, start=1):
                 if not self._prompt_continue(
                         title="Insert Disk",
-                        message=f"Insert floppy for Disk {disk_index} and click Continue.",
+                        message=f"Insert floppy for Disk {disk_index}: {target.display_name} and click Continue.",
                 ):
                     self._append_log("Write workflow stopped by user.")
                     return
@@ -635,10 +773,10 @@ class WriteImagesTab(QWidget):
                 while True:
                     try:
                         command = build_write_command(
-                            image_path=image_path,
-                            fmt=self._selected_format(),
+                            image_path=target.image_path,
+                            fmt="" if target.skip_format else self._selected_format(),
                             verify=self.verify_checkbox.isChecked(),
-                            extra_flags=self.extra_flags_input.text(),
+                            extra_flags=_merge_extra_flags(target.extra_flags, self.extra_flags_input.text()),
                             gw_executable=self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw",
                         )
                     except InvalidExtraFlagsError as exc:
@@ -733,14 +871,14 @@ class WriteImagesTab(QWidget):
             return self.custom_format_input.text().strip()
         return self._selected_dropdown_format()
 
-    def _collect_disk_files(self) -> list[Path]:
-        files: list[Path] = []
+    def _collect_write_targets(self) -> list[WriteTarget]:
+        targets: list[WriteTarget] = []
         for index in range(self.file_list.count()):
             item = self.file_list.item(index)
-            path_value = item.data(Qt.UserRole)
-            if path_value and item.checkState() == Qt.Checked:
-                files.append(Path(path_value))
-        return files
+            target = item.data(Qt.UserRole)
+            if isinstance(target, WriteTarget) and item.checkState() == Qt.Checked:
+                targets.append(target)
+        return targets
 
     def _set_watched_folder(self, folder_path: str) -> None:
         existing_dirs = self._folder_watcher.directories()
@@ -840,11 +978,11 @@ class WriteImagesTab(QWidget):
 
         for index in range(self.file_list.count()):
             item = self.file_list.item(index)
-            path_value = item.data(Qt.UserRole)
-            if not path_value:
+            target = item.data(Qt.UserRole)
+            if not isinstance(target, WriteTarget):
                 continue
 
-            group = self._group_name_from_path(path_value)
+            group = self._group_name_from_path(target.group_key)
 
             if group not in seen:
                 seen.add(group)
@@ -862,11 +1000,11 @@ class WriteImagesTab(QWidget):
 
         for index in range(self.file_list.count()):
             item = self.file_list.item(index)
-            path_value = item.data(Qt.UserRole)
-            if not path_value:
+            target = item.data(Qt.UserRole)
+            if not isinstance(target, WriteTarget):
                 continue
 
-            group = self._group_name_from_path(path_value)
+            group = self._group_name_from_path(target.group_key)
 
             if group == target_group:
                 item.setCheckState(Qt.Checked)
@@ -2110,3 +2248,9 @@ def _disk_sort_key(path: Path) -> tuple[int, str]:
     if match:
         return int(match.group(1)), path.name.lower()
     return 9999, path.name.lower()
+
+
+def _write_target_sort_key(target: WriteTarget) -> tuple[int, str]:
+    if target.skip_format:
+        return _disk_sort_key(Path(target.group_key))
+    return _disk_sort_key(target.image_path)
