@@ -77,14 +77,52 @@ class GreaseweazleCommandTests(unittest.TestCase):
                 gw_executable="gw",
             )
 
-    def test_erase_command_accepts_format_and_extra_flags(self) -> None:
+    def test_erase_command_defaults_to_plain_erase(self) -> None:
         command = build_erase_command(
-            fmt="ibm.1440",
-            extra_flags='--drive "unit 0"',
+            device="",
+            drive="",
+            revs=0,
+            tracks="",
+            hfreq=False,
+            fake_index="",
+            extra_flags="",
             gw_executable="gw",
         )
 
-        self.assertEqual(command, ["gw", "erase", "--format", "ibm.1440", "--drive", "unit 0"])
+        self.assertEqual(command, ["gw", "erase"])
+
+    def test_erase_command_accepts_erase_options_and_extra_flags(self) -> None:
+        command = build_erase_command(
+            device="/dev/ttyACM0",
+            drive="B",
+            revs=2,
+            tracks="c=0-79:h=0-1",
+            hfreq=True,
+            fake_index="300rpm",
+            extra_flags='--device "override device"',
+            gw_executable="gw",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "gw",
+                "erase",
+                "--device",
+                "/dev/ttyACM0",
+                "--drive",
+                "B",
+                "--revs",
+                "2",
+                "--tracks",
+                "c=0-79:h=0-1",
+                "--hfreq",
+                "--fake-index",
+                "300rpm",
+                "--device",
+                "override device",
+            ],
+        )
 
     def test_clean_command_accepts_extra_flags(self) -> None:
         command = build_clean_command(

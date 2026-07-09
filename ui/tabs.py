@@ -1959,28 +1959,35 @@ class ToolsTab(QWidget):
         erase_group = QGroupBox("Erase Disk")
         erase_layout = QFormLayout(erase_group)
 
-        self._all_formats_loaded = False
-        self.format_combo = QComboBox()
-        self.custom_format_checkbox = QCheckBox("Use custom format")
-        self.custom_format_input = QLineEdit()
-        self.custom_format_input.setPlaceholderText("e.g. ibm.1440")
-        self.custom_format_input.setEnabled(False)
-
-        self._populate_format_combo()
-        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
-        self.format_combo.currentIndexChanged.connect(self._save_settings)
-        self.custom_format_checkbox.toggled.connect(self._on_custom_format_toggled)
-        self.custom_format_checkbox.toggled.connect(self._save_settings)
-        self.custom_format_input.textChanged.connect(self._save_settings)
-
+        self.erase_device_input = QLineEdit()
+        self.erase_device_input.setPlaceholderText("optional COM/serial device")
+        self.erase_device_input.textChanged.connect(self._save_settings)
+        self.erase_drive_combo = QComboBox()
+        self.erase_drive_combo.addItems(["Default", "A", "B", "0", "1", "2", "3"])
+        self.erase_drive_combo.currentIndexChanged.connect(self._save_settings)
+        self.erase_revs_input = QSpinBox()
+        self.erase_revs_input.setRange(0, 99)
+        self.erase_revs_input.setSpecialValueText("Default")
+        self.erase_revs_input.valueChanged.connect(self._save_settings)
+        self.erase_tracks_input = QLineEdit()
+        self.erase_tracks_input.setPlaceholderText("e.g. c=0-79:h=0-1")
+        self.erase_tracks_input.textChanged.connect(self._save_settings)
+        self.erase_hfreq_checkbox = QCheckBox("Erase with high-frequency signal")
+        self.erase_hfreq_checkbox.toggled.connect(self._save_settings)
+        self.erase_fake_index_input = QLineEdit()
+        self.erase_fake_index_input.setPlaceholderText("e.g. 300rpm, 200ms")
+        self.erase_fake_index_input.textChanged.connect(self._save_settings)
         self.erase_extra_flags_input = QLineEdit()
         self.erase_extra_flags_input.textChanged.connect(self._save_settings)
         self.erase_btn = QPushButton("Erase Disk")
         self.erase_btn.clicked.connect(self._start_erase)
 
-        erase_layout.addRow("Disk format:", self.format_combo)
-        erase_layout.addRow("Custom:", self.custom_format_checkbox)
-        erase_layout.addRow("Custom format string:", self.custom_format_input)
+        erase_layout.addRow("Device:", self.erase_device_input)
+        erase_layout.addRow("Drive:", self.erase_drive_combo)
+        erase_layout.addRow("Revolutions:", self.erase_revs_input)
+        erase_layout.addRow("Tracks:", self.erase_tracks_input)
+        erase_layout.addRow("High frequency:", self.erase_hfreq_checkbox)
+        erase_layout.addRow("Fake index:", self.erase_fake_index_input)
         erase_layout.addRow("Extra flags:", self.erase_extra_flags_input)
         erase_layout.addRow(self.erase_btn)
         root.addWidget(erase_group)
@@ -2014,17 +2021,24 @@ class ToolsTab(QWidget):
     def _load_settings(self) -> None:
         self._loading_settings = True
 
-        selected_format = self._settings.value("tools/selected_format", "ibm.1440", type=str)
-        custom_enabled = self._settings.value("tools/custom_format_enabled", False, type=bool)
-        custom_text = self._settings.value("tools/custom_format_text", "", type=str)
-
-        format_index = self.format_combo.findText(selected_format)
-        if format_index >= 0:
-            self.format_combo.setCurrentIndex(format_index)
-
-        self.custom_format_checkbox.setChecked(custom_enabled)
-        self.custom_format_input.setText(custom_text)
-        self._on_custom_format_toggled(custom_enabled)
+        self.erase_device_input.setText(
+            self._settings.value("tools/erase_device", "", type=str)
+        )
+        erase_drive = self._settings.value("tools/erase_drive", "", type=str)
+        drive_index = self.erase_drive_combo.findText(erase_drive)
+        self.erase_drive_combo.setCurrentIndex(drive_index if drive_index >= 0 else 0)
+        self.erase_revs_input.setValue(
+            self._settings.value("tools/erase_revs", 0, type=int)
+        )
+        self.erase_tracks_input.setText(
+            self._settings.value("tools/erase_tracks", "", type=str)
+        )
+        self.erase_hfreq_checkbox.setChecked(
+            self._settings.value("tools/erase_hfreq", False, type=bool)
+        )
+        self.erase_fake_index_input.setText(
+            self._settings.value("tools/erase_fake_index", "", type=str)
+        )
 
         self.erase_extra_flags_input.setText(
             self._settings.value("tools/erase_extra_flags", "", type=str)
@@ -2045,15 +2059,15 @@ class ToolsTab(QWidget):
         self._settings.setValue("tools/erase_extra_flags", self.erase_extra_flags_input.text())
         self._settings.setValue("tools/clean_extra_flags", self.clean_extra_flags_input.text())
         self._settings.setValue("tools/update_extra_flags", self.update_extra_flags_input.text())
+        self._settings.setValue("tools/erase_device", self.erase_device_input.text().strip())
+        self._settings.setValue("tools/erase_drive", self._selected_erase_drive())
+        self._settings.setValue("tools/erase_revs", self.erase_revs_input.value())
+        self._settings.setValue("tools/erase_tracks", self.erase_tracks_input.text().strip())
+        self._settings.setValue("tools/erase_hfreq", self.erase_hfreq_checkbox.isChecked())
         self._settings.setValue(
-            "tools/custom_format_enabled",
-            self.custom_format_checkbox.isChecked(),
+            "tools/erase_fake_index",
+            self.erase_fake_index_input.text().strip(),
         )
-        self._settings.setValue("tools/custom_format_text", self.custom_format_input.text())
-
-        current_text = self.format_combo.currentText().strip()
-        if current_text and current_text != LOAD_MORE_FORMATS_TEXT:
-            self._settings.setValue("tools/selected_format", current_text)
 
     def _start_erase(self) -> None:
         if not self._confirm(
@@ -2064,7 +2078,12 @@ class ToolsTab(QWidget):
 
         try:
             command = build_erase_command(
-                fmt=self._selected_format(),
+                device=self.erase_device_input.text(),
+                drive=self._selected_erase_drive(),
+                revs=self.erase_revs_input.value(),
+                tracks=self.erase_tracks_input.text(),
+                hfreq=self.erase_hfreq_checkbox.isChecked(),
+                fake_index=self.erase_fake_index_input.text(),
                 extra_flags=self.erase_extra_flags_input.text(),
                 gw_executable=self._gw_executable(),
             )
@@ -2126,68 +2145,11 @@ class ToolsTab(QWidget):
         finally:
             self._set_busy(False)
 
-    def _populate_format_combo(self) -> None:
-        current_value = self.format_combo.currentText().strip()
-        self.format_combo.blockSignals(True)
-        self.format_combo.clear()
-        self.format_combo.addItems(COMMON_GW_FORMATS)
-        if self._all_formats_loaded:
-            self.format_combo.insertSeparator(self.format_combo.count())
-            for fmt in ALL_GW_FORMATS:
-                if fmt not in COMMON_GW_FORMATS:
-                    self.format_combo.addItem(fmt)
-        else:
-            self.format_combo.insertSeparator(self.format_combo.count())
-            self.format_combo.addItem(LOAD_MORE_FORMATS_TEXT)
-
-        if current_value and current_value != LOAD_MORE_FORMATS_TEXT:
-            index = self.format_combo.findText(current_value)
-            if index >= 0:
-                self.format_combo.setCurrentIndex(index)
-            else:
-                default_index = self.format_combo.findText("ibm.1440")
-                self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
-        else:
-            default_index = self.format_combo.findText("ibm.1440")
-            self.format_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
-        self.format_combo.blockSignals(False)
-
-    def _on_format_changed(self, index: int) -> None:
-        if index < 0:
-            return
-        if self.format_combo.itemText(index) != LOAD_MORE_FORMATS_TEXT:
-            return
-
-        previous_format = "ibm.1440"
-        if index > 0:
-            previous_format = self.format_combo.itemText(index - 1)
-
-        self._all_formats_loaded = True
-        self._populate_format_combo()
-        restored_index = self.format_combo.findText(previous_format)
-        if restored_index >= 0:
-            self.format_combo.setCurrentIndex(restored_index)
-
-        self._save_settings()
-        QTimer.singleShot(0, self.format_combo.showPopup)
-
-    def _on_custom_format_toggled(self, checked: bool) -> None:
-        self.format_combo.setEnabled(not checked)
-        self.custom_format_input.setEnabled(checked)
-        if checked and not self.custom_format_input.text().strip():
-            self.custom_format_input.setText(self._selected_dropdown_format())
-        self._save_settings()
-
-    def _selected_dropdown_format(self) -> str:
-        current_text = self.format_combo.currentText().strip()
-        if current_text == LOAD_MORE_FORMATS_TEXT:
-            return "ibm.1440"
+    def _selected_erase_drive(self) -> str:
+        current_text = self.erase_drive_combo.currentText().strip()
+        if current_text == "Default":
+            return ""
         return current_text
-
-    def _selected_format(self) -> str:
-        if self.custom_format_checkbox.isChecked():
-            return self.custom_format_input.text().strip()
-        return self._selected_dropdown_format()
 
     def _gw_executable(self) -> str:
         return self._settings.value("app/gw_path", detect_gw_executable(), type=str).strip() or "gw"

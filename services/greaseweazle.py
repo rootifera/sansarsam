@@ -120,13 +120,28 @@ def build_convert_command(
 
 
 def build_erase_command(
-    fmt: str,
+    device: str,
+    drive: str,
+    revs: int,
+    tracks: str,
+    hfreq: bool,
+    fake_index: str,
     extra_flags: str,
     gw_executable: str = "gw",
 ) -> list[str]:
     command = [gw_executable, "erase"]
-    if fmt.strip():
-        command.extend(["--format", fmt.strip()])
+    if device.strip():
+        command.extend(["--device", device.strip()])
+    if drive.strip():
+        command.extend(["--drive", drive.strip()])
+    if revs > 0:
+        command.extend(["--revs", str(revs)])
+    if tracks.strip():
+        command.extend(["--tracks", tracks.strip()])
+    if hfreq:
+        command.append("--hfreq")
+    if fake_index.strip():
+        command.extend(["--fake-index", fake_index.strip()])
     command.extend(_split_extra_flags(extra_flags))
     return command
 
